@@ -36900,6 +36900,21 @@ var require_errors = __commonJS({
         this.code = code || "UND_ERR_SOCKS5";
       }
     };
+    var kMessageSizeExceededError = /* @__PURE__ */ Symbol.for("undici.error.UND_ERR_WS_MESSAGE_SIZE_EXCEEDED");
+    var MessageSizeExceededError = class extends UndiciError {
+      constructor(message) {
+        super(message);
+        this.name = "MessageSizeExceededError";
+        this.message = message || "Max decompressed message size exceeded";
+        this.code = "UND_ERR_WS_MESSAGE_SIZE_EXCEEDED";
+      }
+      static [Symbol.hasInstance](instance) {
+        return instance && instance[kMessageSizeExceededError] === true;
+      }
+      get [kMessageSizeExceededError]() {
+        return true;
+      }
+    };
     module2.exports = {
       AbortError,
       HTTPParserError,
@@ -36924,7 +36939,8 @@ var require_errors = __commonJS({
       ResponseError,
       SecureProxyConnectionError,
       MaxOriginsReachedError,
-      Socks5ProxyError
+      Socks5ProxyError,
+      MessageSizeExceededError
     };
   }
 });
@@ -38322,6 +38338,9 @@ var require_request = __commonJS({
         if (upgrade && typeof upgrade !== "string") {
           throw new InvalidArgumentError("upgrade must be a string");
         }
+        if (upgrade && !isValidHeaderValue(upgrade)) {
+          throw new InvalidArgumentError("invalid upgrade header");
+        }
         if (headersTimeout != null && (!Number.isFinite(headersTimeout) || headersTimeout < 0)) {
           throw new InvalidArgumentError("invalid headersTimeout");
         }
@@ -38571,12 +38590,18 @@ var require_request = __commonJS({
       } else {
         val = `${val}`;
       }
-      if (request.host === null && headerName === "host") {
+      if (headerName === "host") {
+        if (request.host !== null) {
+          throw new InvalidArgumentError("duplicate host header");
+        }
         if (typeof val !== "string") {
           throw new InvalidArgumentError("invalid host header");
         }
         request.host = val;
-      } else if (request.contentLength === null && headerName === "content-length") {
+      } else if (headerName === "content-length") {
+        if (request.contentLength !== null) {
+          throw new InvalidArgumentError("duplicate content-length header");
+        }
         request.contentLength = parseInt(val, 10);
         if (!Number.isFinite(request.contentLength)) {
           throw new InvalidArgumentError("invalid content-length header");
@@ -42043,9 +42068,9 @@ var require_formdata_parser = __commonJS({
     var { webidl } = require_webidl();
     var assert = require("node:assert");
     var { isomorphicDecode } = require_infra();
-    var { utf8DecodeBytes } = require_encoding();
     var dd = Buffer.from("--");
     var decoder = new TextDecoder();
+    var decoderIgnoreBOM = new TextDecoder("utf-8", { ignoreBOM: true });
     function isAsciiString(chars) {
       for (let i = 0; i < chars.length; ++i) {
         if ((chars.charCodeAt(i) & ~127) !== 0) {
@@ -42122,7 +42147,7 @@ var require_formdata_parser = __commonJS({
           }
           value = new File([body], filename, { type: contentType });
         } else {
-          value = utf8DecodeBytes(Buffer.from(body));
+          value = decoderIgnoreBOM.decode(Buffer.from(body));
         }
         assert(webidl.is.USVString(name));
         assert(typeof value === "string" && webidl.is.USVString(value) || webidl.is.File(value));
@@ -44309,14 +44334,14 @@ var require_client_h2 = __commonJS({
         if (request.onHeaders(Number(statusCode), parseH2Headers(realHeaders), stream.resume.bind(stream), "") === false) {
           stream.pause();
         }
-      });
-      stream.on("data", (chunk) => {
-        if (request.aborted || request.completed) {
-          return;
-        }
-        if (request.onData(chunk) === false) {
-          stream.pause();
-        }
+        stream.on("data", (chunk) => {
+          if (request.aborted || request.completed) {
+            return;
+          }
+          if (request.onData(chunk) === false) {
+            stream.pause();
+          }
+        });
       });
       stream.once("end", () => {
         stream.removeAllListeners("data");
@@ -45436,7 +45461,7 @@ var require_balanced_pool = __commonJS({
     } = require_pool_base();
     var Pool = require_pool();
     var { kUrl } = require_symbols();
-    var { parseOrigin } = require_util();
+    var util = require_util();
     var kFactory = /* @__PURE__ */ Symbol("factory");
     var kOptions = /* @__PURE__ */ Symbol("options");
     var kGreatestCommonDivisor = /* @__PURE__ */ Symbol("kGreatestCommonDivisor");
@@ -45463,7 +45488,8 @@ var require_balanced_pool = __commonJS({
           throw new InvalidArgumentError("factory must be a function.");
         }
         super();
-        this[kOptions] = opts;
+        this[kOptions] = { ...util.deepClone(opts) };
+        this[kOptions].interceptors = opts.interceptors ? { ...opts.interceptors } : void 0;
         this[kIndex] = -1;
         this[kCurrentWeight] = 0;
         this[kMaxWeightPerServer] = this[kOptions].maxWeightPerServer || 100;
@@ -45478,11 +45504,11 @@ var require_balanced_pool = __commonJS({
         this._updateBalancedPoolStats();
       }
       addUpstream(upstream) {
-        const upstreamOrigin = parseOrigin(upstream).origin;
+        const upstreamOrigin = util.parseOrigin(upstream).origin;
         if (this[kClients].find((pool2) => pool2[kUrl].origin === upstreamOrigin && pool2.closed !== true && pool2.destroyed !== true)) {
           return this;
         }
-        const pool = this[kFactory](upstreamOrigin, Object.assign({}, this[kOptions]));
+        const pool = this[kFactory](upstreamOrigin, this[kOptions]);
         this[kAddClient](pool);
         pool.on("connect", () => {
           pool[kWeight] = Math.min(this[kMaxWeightPerServer], pool[kWeight] + this[kErrorPenalty]);
@@ -45512,7 +45538,7 @@ var require_balanced_pool = __commonJS({
         this[kGreatestCommonDivisor] = result;
       }
       removeUpstream(upstream) {
-        const upstreamOrigin = parseOrigin(upstream).origin;
+        const upstreamOrigin = util.parseOrigin(upstream).origin;
         const pool = this[kClients].find((pool2) => pool2[kUrl].origin === upstreamOrigin && pool2.closed !== true && pool2.destroyed !== true);
         if (pool) {
           this[kRemoveClient](pool);
@@ -45520,7 +45546,7 @@ var require_balanced_pool = __commonJS({
         return this;
       }
       getUpstream(upstream) {
-        const upstreamOrigin = parseOrigin(upstream).origin;
+        const upstreamOrigin = util.parseOrigin(upstream).origin;
         return this[kClients].find((pool) => pool[kUrl].origin === upstreamOrigin && pool.closed !== true && pool.destroyed !== true);
       }
       get upstreams() {
@@ -52334,8 +52360,12 @@ var require_cache_handler = __commonJS({
       if (cacheControlDirectives["stale-if-error"]) {
         staleIfError = staleAt + cacheControlDirectives["stale-if-error"] * 1e3;
       }
-      if (staleWhileRevalidate === -Infinity && staleIfError === -Infinity) {
+      if (cacheControlDirectives.immutable && staleWhileRevalidate === -Infinity && staleIfError === -Infinity) {
         immutable = now + 31536e6;
+      }
+      if (staleWhileRevalidate === -Infinity && staleIfError === -Infinity && immutable === -Infinity) {
+        const freshnessLifetime = staleAt - now;
+        return staleAt + freshnessLifetime;
       }
       return Math.max(staleAt, staleWhileRevalidate, staleIfError, immutable);
     }
@@ -53199,19 +53229,21 @@ var require_decompress = __commonJS({
 var require_deduplication_handler = __commonJS({
   "node_modules/undici/lib/handler/deduplication-handler.js"(exports2, module2) {
     "use strict";
+    var { RequestAbortedError } = require_errors();
+    var DEFAULT_MAX_BUFFER_SIZE = 5 * 1024 * 1024;
     var DeduplicationHandler = class {
       /**
        * @type {DispatchHandler}
        */
       #primaryHandler;
       /**
-       * @type {DispatchHandler[]}
+       * @type {WaitingHandler[]}
        */
       #waitingHandlers = [];
       /**
-       * @type {Buffer[]}
+       * @type {number}
        */
-      #chunks = [];
+      #maxBufferSize = DEFAULT_MAX_BUFFER_SIZE;
       /**
        * @type {number}
        */
@@ -53229,6 +53261,18 @@ var require_deduplication_handler = __commonJS({
        */
       #aborted = false;
       /**
+       * @type {boolean}
+       */
+      #responseStarted = false;
+      /**
+       * @type {boolean}
+       */
+      #responseDataStarted = false;
+      /**
+       * @type {boolean}
+       */
+      #completed = false;
+      /**
        * @type {import('../../types/dispatcher.d.ts').default.DispatchController | null}
        */
       #controller = null;
@@ -53239,20 +53283,51 @@ var require_deduplication_handler = __commonJS({
       /**
        * @param {DispatchHandler} primaryHandler The primary handler
        * @param {() => void} onComplete Callback when request completes
+       * @param {number} [maxBufferSize] Maximum paused buffer size per waiting handler
        */
-      constructor(primaryHandler, onComplete) {
+      constructor(primaryHandler, onComplete, maxBufferSize = DEFAULT_MAX_BUFFER_SIZE) {
         this.#primaryHandler = primaryHandler;
         this.#onComplete = onComplete;
+        this.#maxBufferSize = maxBufferSize;
       }
       /**
-       * Add a waiting handler that will receive the buffered response
+       * Add a waiting handler that will receive response events.
+       * Returns false if deduplication can no longer safely attach this handler.
+       *
        * @param {DispatchHandler} handler
+       * @returns {boolean}
        */
       addWaitingHandler(handler) {
-        this.#waitingHandlers.push(handler);
+        if (this.#completed || this.#responseDataStarted) {
+          return false;
+        }
+        const waitingHandler = this.#createWaitingHandler(handler);
+        const waitingController = waitingHandler.controller;
+        try {
+          handler.onRequestStart?.(waitingController, null);
+          if (waitingController.aborted) {
+            waitingHandler.done = true;
+            return true;
+          }
+          if (this.#responseStarted) {
+            handler.onResponseStart?.(
+              waitingController,
+              this.#statusCode,
+              this.#headers,
+              this.#statusMessage
+            );
+          }
+        } catch {
+          waitingHandler.done = true;
+          return true;
+        }
+        if (!waitingController.aborted) {
+          this.#waitingHandlers.push(waitingHandler);
+        }
+        return true;
       }
       /**
-       * @param {() => void} abort
+       * @param {import('../../types/dispatcher.d.ts').default.DispatchController} controller
        * @param {any} context
        */
       onRequestStart(controller, context) {
@@ -53275,26 +53350,95 @@ var require_deduplication_handler = __commonJS({
        * @param {string} statusMessage
        */
       onResponseStart(controller, statusCode, headers, statusMessage) {
+        this.#responseStarted = true;
         this.#statusCode = statusCode;
         this.#headers = headers;
         this.#statusMessage = statusMessage;
         this.#primaryHandler.onResponseStart?.(controller, statusCode, headers, statusMessage);
+        for (const waitingHandler of this.#waitingHandlers) {
+          const { handler, controller: waitingController } = waitingHandler;
+          if (waitingHandler.done || waitingController.aborted) {
+            waitingHandler.done = true;
+            continue;
+          }
+          try {
+            handler.onResponseStart?.(
+              waitingController,
+              statusCode,
+              headers,
+              statusMessage
+            );
+          } catch {
+          }
+          if (waitingController.aborted) {
+            waitingHandler.done = true;
+          }
+        }
+        this.#pruneDoneWaitingHandlers();
       }
       /**
        * @param {import('../../types/dispatcher.d.ts').default.DispatchController} controller
        * @param {Buffer} chunk
        */
       onResponseData(controller, chunk) {
-        this.#chunks.push(Buffer.from(chunk));
+        if (this.#aborted || this.#completed) {
+          return;
+        }
+        this.#responseDataStarted = true;
         this.#primaryHandler.onResponseData?.(controller, chunk);
+        for (const waitingHandler of this.#waitingHandlers) {
+          const { handler, controller: waitingController } = waitingHandler;
+          if (waitingHandler.done || waitingController.aborted) {
+            waitingHandler.done = true;
+            continue;
+          }
+          if (waitingController.paused) {
+            this.#bufferWaitingChunk(waitingHandler, chunk);
+            continue;
+          }
+          try {
+            handler.onResponseData?.(waitingController, chunk);
+          } catch {
+          }
+          if (waitingController.aborted) {
+            waitingHandler.done = true;
+            waitingHandler.bufferedChunks = [];
+            waitingHandler.bufferedBytes = 0;
+          }
+        }
+        this.#pruneDoneWaitingHandlers();
       }
       /**
        * @param {import('../../types/dispatcher.d.ts').default.DispatchController} controller
        * @param {object} trailers
        */
       onResponseEnd(controller, trailers) {
+        if (this.#aborted || this.#completed) {
+          return;
+        }
+        this.#completed = true;
         this.#primaryHandler.onResponseEnd?.(controller, trailers);
-        this.#notifyWaitingHandlers();
+        for (const waitingHandler of this.#waitingHandlers) {
+          if (waitingHandler.done || waitingHandler.controller.aborted) {
+            waitingHandler.done = true;
+            continue;
+          }
+          this.#flushWaitingHandler(waitingHandler);
+          if (waitingHandler.done || waitingHandler.controller.aborted) {
+            waitingHandler.done = true;
+            continue;
+          }
+          if (waitingHandler.controller.paused && waitingHandler.bufferedChunks.length > 0) {
+            waitingHandler.pendingTrailers = trailers;
+            continue;
+          }
+          try {
+            waitingHandler.handler.onResponseEnd?.(waitingHandler.controller, trailers);
+          } catch {
+          }
+          waitingHandler.done = true;
+        }
+        this.#pruneDoneWaitingHandlers();
         this.#onComplete?.();
       }
       /**
@@ -53302,89 +53446,138 @@ var require_deduplication_handler = __commonJS({
        * @param {Error} err
        */
       onResponseError(controller, err) {
+        if (this.#completed) {
+          return;
+        }
         this.#aborted = true;
+        this.#completed = true;
         this.#primaryHandler.onResponseError?.(controller, err);
-        this.#notifyWaitingHandlersError(err);
+        for (const waitingHandler of this.#waitingHandlers) {
+          this.#errorWaitingHandler(waitingHandler, err);
+        }
+        this.#waitingHandlers = [];
         this.#onComplete?.();
       }
       /**
-       * Notify all waiting handlers with the buffered response
+       * @param {DispatchHandler} handler
+       * @returns {WaitingHandler}
        */
-      #notifyWaitingHandlers() {
-        const body = Buffer.concat(this.#chunks);
-        for (const handler of this.#waitingHandlers) {
-          const waitingController = {
-            resume() {
-            },
-            pause() {
-            },
-            get paused() {
-              return false;
-            },
-            get aborted() {
-              return false;
-            },
-            get reason() {
-              return null;
-            },
-            abort() {
+      #createWaitingHandler(handler) {
+        const waitingHandler = {
+          handler,
+          controller: null,
+          bufferedChunks: [],
+          bufferedBytes: 0,
+          pendingTrailers: null,
+          done: false
+        };
+        const state = {
+          aborted: false,
+          paused: false,
+          reason: null
+        };
+        waitingHandler.controller = {
+          resume: () => {
+            if (state.aborted) {
+              return;
             }
-          };
-          try {
-            handler.onRequestStart?.(waitingController, null);
-            if (waitingController.aborted) {
-              continue;
+            state.paused = false;
+            this.#flushWaitingHandler(waitingHandler);
+            if (this.#completed && waitingHandler.pendingTrailers && waitingHandler.bufferedChunks.length === 0 && !state.paused && !state.aborted) {
+              try {
+                waitingHandler.handler.onResponseEnd?.(waitingHandler.controller, waitingHandler.pendingTrailers);
+              } catch {
+              }
+              waitingHandler.pendingTrailers = null;
+              waitingHandler.done = true;
             }
-            handler.onResponseStart?.(
-              waitingController,
-              this.#statusCode,
-              this.#headers,
-              this.#statusMessage
-            );
-            if (waitingController.aborted) {
-              continue;
+            this.#pruneDoneWaitingHandlers();
+          },
+          pause: () => {
+            if (!state.aborted) {
+              state.paused = true;
             }
-            if (body.length > 0) {
-              handler.onResponseData?.(waitingController, body);
-            }
-            handler.onResponseEnd?.(waitingController, {});
-          } catch {
+          },
+          get paused() {
+            return state.paused;
+          },
+          get aborted() {
+            return state.aborted;
+          },
+          get reason() {
+            return state.reason;
+          },
+          abort: (reason) => {
+            state.aborted = true;
+            state.reason = reason ?? null;
+            waitingHandler.done = true;
+            waitingHandler.pendingTrailers = null;
+            waitingHandler.bufferedChunks = [];
+            waitingHandler.bufferedBytes = 0;
           }
-        }
-        this.#waitingHandlers = [];
-        this.#chunks = [];
+        };
+        return waitingHandler;
       }
       /**
-       * Notify all waiting handlers of an error
-       * @param {Error} err
+       * @param {WaitingHandler} waitingHandler
+       * @param {Buffer} chunk
        */
-      #notifyWaitingHandlersError(err) {
-        for (const handler of this.#waitingHandlers) {
-          const waitingController = {
-            resume() {
-            },
-            pause() {
-            },
-            get paused() {
-              return false;
-            },
-            get aborted() {
-              return true;
-            },
-            get reason() {
-              return err;
-            },
-            abort() {
-            }
-          };
+      #bufferWaitingChunk(waitingHandler, chunk) {
+        if (waitingHandler.done || waitingHandler.controller.aborted) {
+          waitingHandler.done = true;
+          waitingHandler.bufferedChunks = [];
+          waitingHandler.bufferedBytes = 0;
+          return;
+        }
+        const bufferedChunk = Buffer.from(chunk);
+        waitingHandler.bufferedChunks.push(bufferedChunk);
+        waitingHandler.bufferedBytes += bufferedChunk.length;
+        if (waitingHandler.bufferedBytes > this.#maxBufferSize) {
+          const err = new RequestAbortedError(`Deduplicated waiting handler exceeded maxBufferSize (${this.#maxBufferSize} bytes) while paused`);
+          this.#errorWaitingHandler(waitingHandler, err);
+        }
+      }
+      /**
+       * @param {WaitingHandler} waitingHandler
+       */
+      #flushWaitingHandler(waitingHandler) {
+        const { handler, controller } = waitingHandler;
+        while (!waitingHandler.done && !controller.aborted && !controller.paused && waitingHandler.bufferedChunks.length > 0) {
+          const bufferedChunk = waitingHandler.bufferedChunks.shift();
+          waitingHandler.bufferedBytes -= bufferedChunk.length;
           try {
-            handler.onRequestStart?.(waitingController, null);
-            handler.onResponseError?.(waitingController, err);
+            handler.onResponseData?.(controller, bufferedChunk);
           } catch {
           }
+          if (controller.aborted) {
+            waitingHandler.done = true;
+            waitingHandler.pendingTrailers = null;
+            waitingHandler.bufferedChunks = [];
+            waitingHandler.bufferedBytes = 0;
+            break;
+          }
         }
-        this.#waitingHandlers = [];
-        this.#chunks = [];
+      }
+      /**
+       * @param {WaitingHandler} waitingHandler
+       * @param {Error} err
+       */
+      #errorWaitingHandler(waitingHandler, err) {
+        if (waitingHandler.done) {
+          return;
+        }
+        waitingHandler.done = true;
+        waitingHandler.pendingTrailers = null;
+        waitingHandler.bufferedChunks = [];
+        waitingHandler.bufferedBytes = 0;
+        try {
+          waitingHandler.controller.abort(err);
+          waitingHandler.handler.onResponseError?.(waitingHandler.controller, err);
+        } catch {
+        }
+      }
+      #pruneDoneWaitingHandlers() {
+        this.#waitingHandlers = this.#waitingHandlers.filter((waitingHandler) => waitingHandler.done === false);
       }
     };
     module2.exports = DeduplicationHandler;
@@ -53404,7 +53597,8 @@ var require_deduplicate = __commonJS({
       const {
         methods = ["GET"],
         skipHeaderNames = [],
-        excludeHeaderNames = []
+        excludeHeaderNames = [],
+        maxBufferSize = 5 * 1024 * 1024
       } = opts;
       if (typeof opts !== "object" || opts === null) {
         throw new TypeError(`expected type of opts to be an Object, got ${opts === null ? "null" : typeof opts}`);
@@ -53422,6 +53616,9 @@ var require_deduplicate = __commonJS({
       }
       if (!Array.isArray(excludeHeaderNames)) {
         throw new TypeError(`expected opts.excludeHeaderNames to be an array, got ${typeof excludeHeaderNames}`);
+      }
+      if (!Number.isFinite(maxBufferSize) || maxBufferSize <= 0) {
+        throw new TypeError(`expected opts.maxBufferSize to be a positive finite number, got ${maxBufferSize}`);
       }
       const skipHeaderNamesSet = new Set(skipHeaderNames.map((name) => name.toLowerCase()));
       const excludeHeaderNamesSet = new Set(excludeHeaderNames.map((name) => name.toLowerCase()));
@@ -53446,8 +53643,10 @@ var require_deduplicate = __commonJS({
           const dedupeKey = makeDeduplicationKey(cacheKey, excludeHeaderNamesSet);
           const pendingHandler = pendingRequests.get(dedupeKey);
           if (pendingHandler) {
-            pendingHandler.addWaitingHandler(handler);
-            return true;
+            if (pendingHandler.addWaitingHandler(handler)) {
+              return true;
+            }
+            return dispatch(opts2, handler);
           }
           const deduplicationHandler = new DeduplicationHandler(
             handler,
@@ -53456,7 +53655,8 @@ var require_deduplicate = __commonJS({
               if (pendingRequestsChannel.hasSubscribers) {
                 pendingRequestsChannel.publish({ size: pendingRequests.size, key: dedupeKey, type: "removed" });
               }
-            }
+            },
+            maxBufferSize
           );
           pendingRequests.set(dedupeKey, deduplicationHandler);
           if (pendingRequestsChannel.hasSubscribers) {
@@ -56562,9 +56762,11 @@ var require_fetch = __commonJS({
       function dispatch({ body }) {
         const url = requestCurrentURL(request);
         const agent = fetchParams.controller.dispatcher;
+        const path2 = url.pathname + url.search;
+        const hasTrailingQuestionMark = url.search.length === 0 && url.href[url.href.length - url.hash.length - 1] === "?";
         return new Promise((resolve, reject) => agent.dispatch(
           {
-            path: url.href.slice(url.origin.length, url.hash.length ? -url.hash.length : void 0),
+            path: hasTrailingQuestionMark ? `${path2}?` : path2,
             origin: url.origin,
             method: request.method,
             body: agent.isMockActive ? request.body && (request.body.source || request.body.stream) : body,
@@ -58301,13 +58503,17 @@ var require_util5 = __commonJS({
       return extensionList;
     }
     function isValidClientWindowBits(value) {
+      if (value.length === 0) {
+        return false;
+      }
       for (let i = 0; i < value.length; i++) {
         const byte = value.charCodeAt(i);
         if (byte < 48 || byte > 57) {
           return false;
         }
       }
-      return true;
+      const num = Number.parseInt(value, 10);
+      return num >= 8 && num <= 15;
     }
     function getURLRecord(url, baseURL) {
       let urlRecord;
@@ -58644,18 +58850,31 @@ var require_permessage_deflate = __commonJS({
     "use strict";
     var { createInflateRaw, Z_DEFAULT_WINDOWBITS } = require("node:zlib");
     var { isValidClientWindowBits } = require_util5();
+    var { MessageSizeExceededError } = require_errors();
     var tail = Buffer.from([0, 0, 255, 255]);
     var kBuffer = /* @__PURE__ */ Symbol("kBuffer");
     var kLength = /* @__PURE__ */ Symbol("kLength");
+    var kDefaultMaxDecompressedSize = 4 * 1024 * 1024;
     var PerMessageDeflate = class {
       /** @type {import('node:zlib').InflateRaw} */
       #inflate;
       #options = {};
+      /** @type {boolean} */
+      #aborted = false;
+      /** @type {Function|null} */
+      #currentCallback = null;
+      /**
+       * @param {Map<string, string>} extensions
+       */
       constructor(extensions) {
         this.#options.serverNoContextTakeover = extensions.has("server_no_context_takeover");
         this.#options.serverMaxWindowBits = extensions.get("server_max_window_bits");
       }
       decompress(chunk, fin, callback) {
+        if (this.#aborted) {
+          callback(new MessageSizeExceededError());
+          return;
+        }
         if (!this.#inflate) {
           let windowBits = Z_DEFAULT_WINDOWBITS;
           if (this.#options.serverMaxWindowBits) {
@@ -58665,26 +58884,51 @@ var require_permessage_deflate = __commonJS({
             }
             windowBits = Number.parseInt(this.#options.serverMaxWindowBits);
           }
-          this.#inflate = createInflateRaw({ windowBits });
+          try {
+            this.#inflate = createInflateRaw({ windowBits });
+          } catch (err) {
+            callback(err);
+            return;
+          }
           this.#inflate[kBuffer] = [];
           this.#inflate[kLength] = 0;
           this.#inflate.on("data", (data) => {
-            this.#inflate[kBuffer].push(data);
+            if (this.#aborted) {
+              return;
+            }
             this.#inflate[kLength] += data.length;
+            if (this.#inflate[kLength] > kDefaultMaxDecompressedSize) {
+              this.#aborted = true;
+              this.#inflate.removeAllListeners();
+              this.#inflate.destroy();
+              this.#inflate = null;
+              if (this.#currentCallback) {
+                const cb = this.#currentCallback;
+                this.#currentCallback = null;
+                cb(new MessageSizeExceededError());
+              }
+              return;
+            }
+            this.#inflate[kBuffer].push(data);
           });
           this.#inflate.on("error", (err) => {
             this.#inflate = null;
             callback(err);
           });
         }
+        this.#currentCallback = callback;
         this.#inflate.write(chunk);
         if (fin) {
           this.#inflate.write(tail);
         }
         this.#inflate.flush(() => {
+          if (this.#aborted || !this.#inflate) {
+            return;
+          }
           const full = Buffer.concat(this.#inflate[kBuffer], this.#inflate[kLength]);
           this.#inflate[kBuffer].length = 0;
           this.#inflate[kLength] = 0;
+          this.#currentCallback = null;
           callback(null, full);
         });
       }
@@ -58712,6 +58956,7 @@ var require_receiver = __commonJS({
     var { failWebsocketConnection } = require_connection();
     var { WebsocketFrameSend } = require_frame();
     var { PerMessageDeflate } = require_permessage_deflate();
+    var { MessageSizeExceededError } = require_errors();
     var ByteParser = class extends Writable {
       #buffers = [];
       #fragmentsBytes = 0;
@@ -58724,6 +58969,10 @@ var require_receiver = __commonJS({
       #extensions;
       /** @type {import('./websocket').Handler} */
       #handler;
+      /**
+       * @param {import('./websocket').Handler} handler
+       * @param {Map<string, string>|null} extensions
+       */
       constructor(handler, extensions) {
         super();
         this.#handler = handler;
@@ -58827,12 +59076,12 @@ var require_receiver = __commonJS({
             }
             const buffer = this.consume(8);
             const upper = buffer.readUInt32BE(0);
-            if (upper > 2 ** 31 - 1) {
+            const lower = buffer.readUInt32BE(4);
+            if (upper !== 0 || lower > 2 ** 31 - 1) {
               failWebsocketConnection(this.#handler, 1009, "Received payload length > 2^31 bytes.");
               return;
             }
-            const lower = buffer.readUInt32BE(4);
-            this.#info.payloadLength = (upper << 8) + lower;
+            this.#info.payloadLength = lower;
             this.#state = parserStates.READ_DATA;
           } else if (this.#state === parserStates.READ_DATA) {
             if (this.#byteOffset < this.#info.payloadLength) {
@@ -58852,7 +59101,8 @@ var require_receiver = __commonJS({
               } else {
                 this.#extensions.get("permessage-deflate").decompress(body, this.#info.fin, (error, data) => {
                   if (error) {
-                    failWebsocketConnection(this.#handler, 1007, error.message);
+                    const code = error instanceof MessageSizeExceededError ? 1009 : 1007;
+                    failWebsocketConnection(this.#handler, code, error.message);
                     return;
                   }
                   this.writeFragments(data);
@@ -61234,20 +61484,18 @@ var require_scraper = __commonJS({
     var https = require("https");
     var axios = require_axios();
     var cheerio = require_commonjs4();
-    var BASE_URL = "https://novelasportuguesas.com";
-    var FILMES_ARCHIVE = `${BASE_URL}/filme/`;
-    var SERIES_ARCHIVE = `${BASE_URL}/serie/`;
-    var NOVELAS_ARCHIVE = `${BASE_URL}/genero/novelas/`;
+    var BASE_URL = "https://tvparapobreskids.com";
+    var FILMES_ARCHIVE = `${BASE_URL}/filmes/`;
+    var SERIES_ARCHIVE = `${BASE_URL}/series/`;
     var ZETA_API = `${BASE_URL}/wp-json/zetaplayer/v2`;
     var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131 Safari/537.36";
-    var HTTP_TIMEOUT_MS = Math.max(5e3, Number(process.env.STREMIO_NP_HTTP_TIMEOUT_MS) || 25e3);
-    var CATALOG_CACHE_MS = Math.max(6e4, Number(process.env.STREMIO_NP_CACHE_MS) || 6 * 60 * 60 * 1e3);
-    var META_CACHE_MS = Math.max(6e4, Number(process.env.STREMIO_NP_META_CACHE_MS) || CATALOG_CACHE_MS);
-    var META_TIMEOUT_MS = Math.max(2500, Number(process.env.STREMIO_NP_META_TIMEOUT_MS) || 6e3);
-    var META_RETRIES = Math.max(1, Number(process.env.STREMIO_NP_META_RETRIES) || 1);
-    var META_MAX_PATHS = Math.max(1, Number(process.env.STREMIO_NP_META_MAX_PATHS) || 3);
-    var ARCHIVE_MAX_PAGES = Math.max(1, Number(process.env.STREMIO_NP_MAX_ARCHIVE_PAGES) || 500);
-    var ARCHIVE_CONCURRENCY = Math.max(1, Number(process.env.STREMIO_NP_ARCHIVE_CONCURRENCY) || 10);
+    var HTTP_TIMEOUT_MS = Math.max(5e3, Number(process.env.STREMIO_KIDS_HTTP_TIMEOUT_MS) || 25e3);
+    var CATALOG_CACHE_MS = Math.max(6e4, Number(process.env.STREMIO_KIDS_CACHE_MS) || 6 * 60 * 60 * 1e3);
+    var META_CACHE_MS = Math.max(6e4, Number(process.env.STREMIO_KIDS_META_CACHE_MS) || CATALOG_CACHE_MS);
+    var META_TIMEOUT_MS = Math.max(2500, Number(process.env.STREMIO_KIDS_META_TIMEOUT_MS) || 9e3);
+    var META_RETRIES = Math.max(1, Number(process.env.STREMIO_KIDS_META_RETRIES) || 2);
+    var ARCHIVE_MAX_PAGES = Math.max(1, Number(process.env.STREMIO_KIDS_MAX_ARCHIVE_PAGES) || 500);
+    var ARCHIVE_CONCURRENCY = Math.max(1, Number(process.env.STREMIO_KIDS_ARCHIVE_CONCURRENCY) || 10);
     var RETRYABLE_CODES = /* @__PURE__ */ new Set(["ETIMEDOUT", "ECONNRESET", "ECONNABORTED", "ENOTFOUND", "EAI_AGAIN"]);
     var RETRYABLE_STATUS = /* @__PURE__ */ new Set([403, 429, 502, 503, 504]);
     var httpAgent = new http2.Agent({ keepAlive: true, maxSockets: 64 });
@@ -61277,33 +61525,10 @@ var require_scraper = __commonJS({
       },
       validateStatus: () => true
     });
-    var cinemetaClient = axios.create({
-      baseURL: "https://v3-cinemeta.strem.io",
-      timeout: 9e3,
-      validateStatus: () => true
-    });
-    var imdbTitleClient = axios.create({
-      baseURL: "https://www.imdb.com",
-      timeout: 12e3,
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,pt-PT;q=0.8",
-        Referer: "https://www.imdb.com/"
-      },
-      validateStatus: () => true
-    });
     var filmesCache = null;
     var seriesCache = null;
-    var novelasCache = null;
-    var genreArchiveCache = /* @__PURE__ */ new Map();
     var movieMetaCache = /* @__PURE__ */ new Map();
     var seriesMetaCache = /* @__PURE__ */ new Map();
-    var imdbRatingCache = /* @__PURE__ */ new Map();
-    var IMDB_ID_OVERRIDES = /* @__PURE__ */ new Map([
-      ["series:golpe de sorte", "tt10133388"],
-      ["series:golpe-de-sorte", "tt10133388"]
-    ]);
     function clone(obj) {
       if (obj == null) return obj;
       return JSON.parse(JSON.stringify(obj));
@@ -61322,29 +61547,24 @@ var require_scraper = __commonJS({
     function toTitleCase(s) {
       return String(s || "").toLowerCase().replace(/\S+/g, (w) => w.charAt(0).toUpperCase() + w.slice(1));
     }
-    async function safeClientGet(path2, retries = 3, timeoutMs = HTTP_TIMEOUT_MS) {
-      let last = null;
-      const n = Math.max(1, retries);
-      for (let i = 1; i <= n; i++) {
-        try {
-          const res = await client.get(path2, { timeout: timeoutMs });
-          last = res;
-          if (res.status === 200) return res;
-          if (RETRYABLE_STATUS.has(res.status) && i < n) {
-            await new Promise((r) => setTimeout(r, 500 * i));
-            continue;
-          }
-          return res;
-        } catch (e) {
-          const code = e && (e.code || e.cause?.code);
-          if (i < n && RETRYABLE_CODES.has(code)) {
-            await new Promise((r) => setTimeout(r, 500 * i));
-            continue;
-          }
-          return null;
-        }
-      }
-      return last;
+    function normalizeSpace(s) {
+      return String(s || "").replace(/\s+/g, " ").trim();
+    }
+    function yearFromText(text) {
+      const m = String(text || "").match(/\b((?:19|20)\d{2})\b/);
+      if (!m) return void 0;
+      const y = parseInt(m[1], 10);
+      if (!Number.isFinite(y) || y < 1870 || y > 2100) return void 0;
+      return y;
+    }
+    function parseImdbRating(text, html) {
+      const raw = `${String(text || "")}
+${String(html || "")}`;
+      const m = raw.match(/IMDb(?:\s*Rating)?\s*[:\-]?\s*([0-9](?:[.,][0-9])?)/i);
+      if (!m || !m[1]) return void 0;
+      const n = parseFloat(String(m[1]).replace(",", "."));
+      if (!Number.isFinite(n) || n < 0 || n > 10) return void 0;
+      return n.toFixed(1);
     }
     function extractArchiveMaxPage($, html) {
       let max = 1;
@@ -61365,10 +61585,32 @@ var require_scraper = __commonJS({
       }
       return Math.max(1, Math.min(max, ARCHIVE_MAX_PAGES));
     }
+    async function safeClientGet(path2, retries = 3, timeoutMs = HTTP_TIMEOUT_MS) {
+      const n = Math.max(1, retries);
+      for (let i = 1; i <= n; i++) {
+        try {
+          const res = await client.get(path2, { timeout: timeoutMs });
+          if (res.status === 200) return res;
+          if (RETRYABLE_STATUS.has(res.status) && i < n) {
+            await new Promise((r) => setTimeout(r, 500 * i));
+            continue;
+          }
+          return res;
+        } catch (e) {
+          const code = e && (e.code || e.cause?.code);
+          if (i < n && RETRYABLE_CODES.has(code)) {
+            await new Promise((r) => setTimeout(r, 500 * i));
+            continue;
+          }
+          return null;
+        }
+      }
+      return null;
+    }
     function parseDisplayItems($, contentType) {
-      const seg = contentType === "movie" ? "filme" : "serie";
+      const seg = contentType === "movie" ? "filmes" : "series";
       const map = /* @__PURE__ */ new Map();
-      $(".display-item .item-box").each((_, box) => {
+      $(".display-item .item-box, article, .post, .entry").each((_, box) => {
         const $box = $(box);
         const href = $box.find("a[href]").first().attr("href");
         if (!href) return;
@@ -61388,192 +61630,116 @@ var require_scraper = __commonJS({
           img.attr("data-original") || img.attr("data-src") || img.attr("src") || ""
         );
         const name = toTitleCase(
-          (img.attr("alt") || "").trim() || $box.find(".item-desc-title h3, .item-desc-title").first().text().trim() || slug.replace(/-/g, " ")
+          (img.attr("alt") || "").trim() || $box.find("h2, h3, .entry-title, .item-desc-title").first().text().trim() || slug.replace(/-/g, " ")
         );
-        const id = contentType === "movie" ? `novelaspt_movie_${slug}` : `novelaspt_series_${slug}`;
+        const id = contentType === "movie" ? `kidspt_movie_${slug}` : `kidspt_series_${slug}`;
         map.set(`${contentType}:${slug}`, {
           id,
           slug,
           type: contentType,
           name,
           poster: poster || void 0,
-          genres: ["None"]
+          genres: ["Anima\xE7\xE3o"]
         });
       });
       return [...map.values()];
     }
-    function parseDisplayItemsAny($) {
-      const map = /* @__PURE__ */ new Map();
-      $(".display-item .item-box").each((_, box) => {
-        const $box = $(box);
-        const href = $box.find("a[href]").first().attr("href");
-        if (!href) return;
-        let pathname = "";
-        try {
-          pathname = new URL(absoluteUrl(href)).pathname;
-        } catch (_2) {
-          return;
-        }
-        const parts = pathname.split("/").filter(Boolean);
-        let type = null;
-        let slug = null;
-        const iMovie = parts.indexOf("filme");
-        const iSeries = parts.indexOf("serie");
-        if (iMovie >= 0 && parts[iMovie + 1]) {
-          type = "movie";
-          slug = normalizeSlug(parts[iMovie + 1]);
-        } else if (iSeries >= 0 && parts[iSeries + 1]) {
-          type = "series";
-          slug = normalizeSlug(parts[iSeries + 1]);
-        }
-        if (!type || !slug || slug === "page" || slug === "feed") return;
-        const img = $box.find("img").first();
-        const poster = absoluteUrl(
-          img.attr("data-original") || img.attr("data-src") || img.attr("src") || ""
-        );
-        const name = toTitleCase(
-          (img.attr("alt") || "").trim() || $box.find(".item-desc-title h3, .item-desc-title").first().text().trim() || slug.replace(/-/g, " ")
-        );
-        const id = type === "movie" ? `novelaspt_movie_${slug}` : `novelaspt_series_${slug}`;
-        map.set(`${type}:${slug}`, { id, slug, type, name, poster: poster || void 0, genres: ["None"] });
-      });
-      return [...map.values()];
-    }
-    async function poolMap(items, limit, worker) {
-      const out = new Array(items.length);
-      let idx = 0;
-      async function runOne() {
-        for (; ; ) {
-          const i = idx++;
-          if (i >= items.length) return;
-          out[i] = await worker(items[i], i);
-        }
-      }
-      await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => runOne()));
-      return out;
+    function catalogLog(contentType, msg) {
+      const label = contentType === "movie" ? "filmes" : "series";
+      console.log(`[KidsPT][catalog:${label}] ${msg}`);
     }
     async function fetchCatalog(startUrl, contentType) {
       const firstPath = startUrl.startsWith(BASE_URL) ? startUrl.slice(BASE_URL.length) : startUrl;
       const first = await safeClientGet(firstPath || "/", 3, HTTP_TIMEOUT_MS);
       if (!first || first.status !== 200 || typeof first.data !== "string") return [];
-      const items = parseDisplayItems(cheerio.load(first.data), contentType);
-      const maxPage = extractArchiveMaxPage(cheerio.load(first.data), first.data);
-      if (maxPage <= 1) return items;
-      const pages = [];
-      for (let p = 2; p <= maxPage; p++) {
-        pages.push(`${startUrl.replace(/\/$/, "")}/page/${p}/`);
-      }
-      const rows = await poolMap(pages, ARCHIVE_CONCURRENCY, async (url) => {
+      const firstItems = parseDisplayItems(cheerio.load(first.data), contentType);
+      const hintedMaxPage = extractArchiveMaxPage(cheerio.load(first.data), first.data);
+      catalogLog(contentType, `Passo 1/2: descobrir total de paginas em ${startUrl}`);
+      catalogLog(contentType, `Pagina 1: ${firstItems.length} itens`);
+      catalogLog(contentType, `Paginacao visivel no HTML sugere ate ${hintedMaxPage} paginas`);
+      let discoveredMaxPage = firstItems.length ? 1 : 0;
+      let consecutiveMisses = 0;
+      const probeLimit = Math.min(ARCHIVE_MAX_PAGES, Math.max(hintedMaxPage + 2, 3));
+      for (let p = 2; p <= probeLimit; p++) {
+        const url = `${startUrl.replace(/\/$/, "")}/page/${p}/`;
         const path2 = url.startsWith(BASE_URL) ? url.slice(BASE_URL.length) : url;
         const res = await safeClientGet(path2, 2, HTTP_TIMEOUT_MS);
-        if (!res || res.status !== 200 || typeof res.data !== "string") return [];
-        return parseDisplayItems(cheerio.load(res.data), contentType);
-      });
-      const dedupe = new Map(items.map((x) => [x.id, x]));
-      for (const arr of rows) {
-        for (const it of arr) dedupe.set(it.id, it);
+        if (!res || res.status !== 200 || typeof res.data !== "string") {
+          consecutiveMisses += 1;
+          catalogLog(contentType, `Sondagem pagina ${p}: sem conteudo (status ${res?.status || "erro"})`);
+        } else {
+          const count = parseDisplayItems(cheerio.load(res.data), contentType).length;
+          if (count > 0) {
+            discoveredMaxPage = p;
+            consecutiveMisses = 0;
+            catalogLog(contentType, `Sondagem pagina ${p}: encontrada (${count} itens)`);
+          } else {
+            consecutiveMisses += 1;
+            catalogLog(contentType, `Sondagem pagina ${p}: vazia`);
+          }
+        }
+        if (p > hintedMaxPage && consecutiveMisses >= 2) break;
       }
+      if (discoveredMaxPage <= 0) discoveredMaxPage = 1;
+      catalogLog(contentType, `Total de paginas encontradas: ${discoveredMaxPage}`);
+      catalogLog(contentType, `Passo 2/2: recolher itens de cada pagina`);
+      const dedupe = /* @__PURE__ */ new Map();
+      for (let p = 1; p <= discoveredMaxPage; p++) {
+        let pageItems = [];
+        if (p === 1) {
+          pageItems = firstItems;
+        } else {
+          const url = `${startUrl.replace(/\/$/, "")}/page/${p}/`;
+          const path2 = url.startsWith(BASE_URL) ? url.slice(BASE_URL.length) : url;
+          const res = await safeClientGet(path2, 2, HTTP_TIMEOUT_MS);
+          if (!res || res.status !== 200 || typeof res.data !== "string") {
+            catalogLog(contentType, `Leitura pagina ${p}/${discoveredMaxPage}: falhou (status ${res?.status || "erro"})`);
+            continue;
+          }
+          pageItems = parseDisplayItems(cheerio.load(res.data), contentType);
+        }
+        catalogLog(contentType, `Leitura pagina ${p}/${discoveredMaxPage}: ${pageItems.length} itens`);
+        for (const it of pageItems) dedupe.set(it.id, it);
+      }
+      catalogLog(contentType, `Total de itens unicos no catalogo: ${dedupe.size}`);
       return [...dedupe.values()];
     }
-    function genreToSlug(genreLabel) {
-      return normalizeSlug(genreLabel).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    }
-    async function getItemsByGenreLabel(genreLabel) {
-      const slug = genreToSlug(genreLabel);
-      if (!slug) return [];
-      const key = slug;
-      const row = genreArchiveCache.get(key);
-      if (row && Date.now() - row.time < CATALOG_CACHE_MS) return clone(row.items);
-      const startUrl = `${BASE_URL}/genero/${slug}/`;
-      const firstPath = startUrl.slice(BASE_URL.length);
-      const first = await safeClientGet(firstPath || "/", 3, HTTP_TIMEOUT_MS);
-      if (!first || first.status !== 200 || typeof first.data !== "string") {
-        return row?.items ? clone(row.items) : [];
-      }
-      const dedupe = /* @__PURE__ */ new Map();
-      const addRows = (arr) => {
-        for (const it of arr) {
-          const k = `${it.type}:${it.slug}`;
-          if (!dedupe.has(k)) dedupe.set(k, it);
-        }
-      };
-      addRows(parseDisplayItemsAny(cheerio.load(first.data)));
-      const maxPage = extractArchiveMaxPage(cheerio.load(first.data), first.data);
-      if (maxPage > 1) {
-        const pages = [];
-        for (let p = 2; p <= maxPage; p++) pages.push(`${startUrl.replace(/\/$/, "")}/page/${p}/`);
-        const rows = await poolMap(pages, ARCHIVE_CONCURRENCY, async (url) => {
-          const path2 = url.slice(BASE_URL.length);
-          const res = await safeClientGet(path2, 2, HTTP_TIMEOUT_MS);
-          if (!res || res.status !== 200 || typeof res.data !== "string") return [];
-          return parseDisplayItemsAny(cheerio.load(res.data));
-        });
-        for (const arr of rows) addRows(arr);
-      }
-      const items = [...dedupe.values()].map((it) => ({ ...it, genres: [String(genreLabel)] }));
-      genreArchiveCache.set(key, { time: Date.now(), items: clone(items) });
-      return clone(items);
-    }
-    async function getCoveredIdsForGenres(labels) {
-      const set = /* @__PURE__ */ new Set();
-      const arr = Array.isArray(labels) ? labels : [];
-      for (const g of arr) {
-        const items = await getItemsByGenreLabel(g);
-        for (const it of items) set.add(it.id);
-      }
-      return set;
-    }
-    function getCacheRow(kind) {
-      if (kind === "movie") return filmesCache;
-      if (kind === "series") return seriesCache;
-      return novelasCache;
-    }
-    function setCacheRow(kind, items) {
-      const row = { time: Date.now(), items };
-      if (kind === "movie") filmesCache = row;
-      else if (kind === "series") seriesCache = row;
-      else novelasCache = row;
-    }
     async function getFilmes() {
-      const row = getCacheRow("movie");
-      if (row && Date.now() - row.time < CATALOG_CACHE_MS) return row.items;
+      if (filmesCache && Date.now() - filmesCache.time < CATALOG_CACHE_MS) return filmesCache.items;
       const items = await fetchCatalog(FILMES_ARCHIVE, "movie");
-      if (items.length) setCacheRow("movie", items);
-      return items.length ? items : row?.items || [];
+      if (items.length) filmesCache = { time: Date.now(), items };
+      return items.length ? items : filmesCache?.items || [];
     }
     async function getSeriesPortuguesas() {
-      const row = getCacheRow("series");
-      if (row && Date.now() - row.time < CATALOG_CACHE_MS) return row.items;
+      if (seriesCache && Date.now() - seriesCache.time < CATALOG_CACHE_MS) return seriesCache.items;
       const items = await fetchCatalog(SERIES_ARCHIVE, "series");
-      if (items.length) setCacheRow("series", items);
-      return items.length ? items : row?.items || [];
-    }
-    async function getNovelasPortuguesas() {
-      const row = getCacheRow("novelas");
-      if (row && Date.now() - row.time < CATALOG_CACHE_MS) return row.items;
-      const items = await fetchCatalog(NOVELAS_ARCHIVE, "series");
-      if (items.length) setCacheRow("novelas", items);
-      return items.length ? items : row?.items || [];
-    }
-    function yearFromText(text) {
-      const m = String(text || "").match(/\b((?:19|20)\d{2})\b/);
-      if (!m) return void 0;
-      const y = parseInt(m[1], 10);
-      if (!Number.isFinite(y) || y < 1870 || y > 2100) return void 0;
-      return y;
+      if (items.length) seriesCache = { time: Date.now(), items };
+      return items.length ? items : seriesCache?.items || [];
     }
     function extractSynopsis($) {
-      const block = $(".details-desc").first().text().replace(/\s+/g, " ").trim();
+      const block = normalizeSpace($(".details-desc").first().text());
       if (block) {
-        const fromResumo = block.match(/Resumo do Filme:\s*(.+)$/i) || block.match(/Resumo da S[ée]rie:\s*(.+)$/i) || block.match(/Resumo do S[ée]rie:\s*(.+)$/i) || block.match(/Resumo da Novela:\s*(.+)$/i) || block.match(/Resumo do Novela:\s*(.+)$/i) || block.match(/Resumo:\s*(.+)$/i) || block.match(/Sinopse:\s*(.+)$/i);
+        const fromResumo = block.match(/Resumo do Filme:\s*(.+)$/i) || block.match(/Resumo da S[ée]rie:\s*(.+)$/i) || block.match(/Resumo:\s*(.+)$/i) || block.match(/Sinopse:\s*(.+)$/i);
         if (fromResumo && fromResumo[1]) {
-          const clean = fromResumo[1].replace(/\s+/g, " ").trim();
+          const clean = normalizeSpace(fromResumo[1]);
           if (clean.length > 20) return clean.slice(0, 4500);
         }
         if (block.length > 20) return block.slice(0, 4500);
       }
-      const alt = $(".entry-content, .content, .single-desc, .description").first().text().replace(/\s+/g, " ").trim();
+      const alt = normalizeSpace($(".entry-content, .content, .single-desc, .description").first().text());
       return alt ? alt.slice(0, 4500) : void 0;
+    }
+    function blockText($) {
+      return normalizeSpace($(".details-desc").first().text() || "");
+    }
+    function releaseInfoFromBlock(block) {
+      const src = normalizeSpace(block);
+      if (!src) return void 0;
+      const period = src.match(/(?:Per[ií]odo|Anos?)\s*:\s*([^|]+)$/i);
+      if (period && period[1]) return normalizeSpace(period[1]).slice(0, 40);
+      const year = yearFromText(src);
+      if (year) return String(year);
+      return void 0;
     }
     function extractYoutubeIdFromText(text) {
       const src = String(text || "");
@@ -61608,277 +61774,11 @@ var require_scraper = __commonJS({
       }
       return extractYoutubeIdFromText(html);
     }
-    function parseImdbRating(text, html) {
-      const raw = `${String(text || "")}
-${String(html || "")}`;
-      const m = raw.match(/IMDb(?:\s*Rating)?\s*[:\-]?\s*([0-9](?:[.,][0-9])?)/i);
-      if (!m || !m[1]) return void 0;
-      const n = parseFloat(String(m[1]).replace(",", "."));
-      if (!Number.isFinite(n) || n < 0 || n > 10) return void 0;
-      return n.toFixed(1);
-    }
-    function normalizeKey(s) {
-      return String(s || "").toLowerCase().normalize("NFD").replace(new RegExp("\\p{M}", "gu"), "").replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
-    }
-    function plausibleYear(y) {
-      const n = Number.parseInt(String(y || ""), 10);
-      return Number.isFinite(n) && n >= 1870 && n <= 2100 ? n : null;
-    }
-    function parseImdbRatingValue(raw) {
-      const n = Number.parseFloat(String(raw || "").replace(",", "."));
-      if (!Number.isFinite(n) || n < 0 || n > 10) return void 0;
-      return n.toFixed(1);
-    }
-    function imdbOverrideId(type, title, slug) {
-      const t = String(type || "").trim().toLowerCase();
-      if (!t) return void 0;
-      const titleKey = `${t}:${normalizeKey(title)}`;
-      const slugKey = `${t}:${normalizeSlug(slug)}`;
-      const id = IMDB_ID_OVERRIDES.get(titleKey) || IMDB_ID_OVERRIDES.get(slugKey);
-      return /^tt\d{7,9}$/i.test(String(id || "")) ? String(id).toLowerCase() : void 0;
-    }
-    function extractImdbRatingFromTitleHtml(html) {
-      const raw = String(html || "");
-      if (!raw) return void 0;
-      const fromJsonLd = raw.match(/"aggregateRating"\s*:\s*\{[^{}]*"ratingValue"\s*:\s*"?(?<r>\d+(?:\.\d+)?)"?/i) || raw.match(/"ratingValue"\s*:\s*"?(?<r>\d+(?:\.\d+)?)"?/i);
-      if (fromJsonLd && fromJsonLd.groups && fromJsonLd.groups.r) {
-        const v = parseImdbRatingValue(fromJsonLd.groups.r);
-        if (v) return v;
-      }
-      const fromUi = raw.match(/heroRatingBarAggregateRating__Score[^<]*<span[^>]*>(?<r>\d+(?:\.\d+)?)<\/span>/i) || raw.match(/aria-label="IMDb rating:\s*(?<r>\d+(?:\.\d+)?)\/10"/i);
-      if (fromUi && fromUi.groups && fromUi.groups.r) {
-        const v = parseImdbRatingValue(fromUi.groups.r);
-        if (v) return v;
-      }
-      return void 0;
-    }
-    async function imdbRatingById(imdbId) {
-      const id = String(imdbId || "").trim().toLowerCase();
-      if (!/^tt\d{7,9}$/.test(id)) return null;
-      const row = imdbRatingCache.get(id);
-      if (row && Date.now() - row.time < META_CACHE_MS) return row.rating || null;
-      try {
-        const res = await imdbTitleClient.get(`/title/${id}/`);
-        if (res.status !== 200 || typeof res.data !== "string") return row?.rating || null;
-        const rating = extractImdbRatingFromTitleHtml(res.data) || null;
-        imdbRatingCache.set(id, { time: Date.now(), rating });
-        return rating;
-      } catch (_) {
-        return row?.rating || null;
-      }
-    }
-    async function cinemetaByImdbId(type, imdbId) {
-      const id = String(imdbId || "").trim().toLowerCase();
-      if (!/^tt\d{7,9}$/.test(id)) return null;
-      try {
-        const r = await cinemetaClient.get(`/meta/${type}/${id}.json`);
-        const m = r?.data?.meta;
-        if (r.status !== 200 || !m) return null;
-        return {
-          imdbId: id,
-          imdbRating: m.imdbRating != null ? String(m.imdbRating) : void 0,
-          releaseInfo: m.releaseInfo ? String(m.releaseInfo) : void 0,
-          year: plausibleYear(m.releaseInfo) || plausibleYear(m.year) || void 0
-        };
-      } catch (_) {
-        return null;
-      }
-    }
-    async function cinemetaSearchBest(type, title, hintYear) {
-      const q = String(title || "").trim();
-      if (!q) return null;
-      try {
-        const url = `/catalog/${type}/top/search=${encodeURIComponent(q)}.json`;
-        const r = await cinemetaClient.get(url);
-        const metas = Array.isArray(r?.data?.metas) ? r.data.metas : [];
-        if (r.status !== 200 || !metas.length) return null;
-        const want = normalizeKey(q);
-        const y = plausibleYear(hintYear);
-        const scored = [];
-        for (const m of metas.slice(0, 40)) {
-          const id = String(m.id || m.imdb_id || "").trim().toLowerCase();
-          if (!/^tt\d{7,9}$/.test(id)) continue;
-          const name = normalizeKey(m.name || "");
-          const cYear = plausibleYear(m.releaseInfo) || plausibleYear(m.year);
-          let score = 0;
-          if (name === want) score += 8;
-          else if (name.includes(want) || want.includes(name)) score += 4;
-          if (y != null && cYear != null) score += Math.max(0, 8 - Math.abs(cYear - y));
-          if (m.imdbRating != null) score += 1;
-          scored.push({
-            score,
-            imdbId: id,
-            imdbRating: m.imdbRating != null ? String(m.imdbRating) : void 0,
-            year: cYear || void 0,
-            exactTitle: name === want
-          });
-        }
-        if (!scored.length) return null;
-        if (y != null) {
-          const nearYear = scored.filter((c) => c.year != null && Math.abs(c.year - y) <= 2);
-          if (nearYear.length) {
-            nearYear.sort((a, b) => b.score - a.score);
-            const best2 = nearYear[0];
-            return { ...best2, strong: !!best2.exactTitle };
-          }
-          return null;
-        }
-        scored.sort((a, b) => b.score - a.score);
-        if ((scored[0]?.score || 0) < 6) return null;
-        const best = scored[0];
-        return { ...best, strong: !!best.exactTitle && best.score >= 8 };
-      } catch (_) {
-        return null;
-      }
-    }
-    function normalizeSpace(s) {
-      return String(s || "").replace(/\s+/g, " ").trim();
-    }
-    function blockText($) {
-      return normalizeSpace($(".details-desc").first().text() || "");
-    }
-    function labelValue(block, labels) {
-      const src = normalizeSpace(block);
-      if (!src) return "";
-      for (const label of labels) {
-        const re = new RegExp(`${label}\\s*:\\s*(.+?)(?=(?:\\b[A-Z\xC0-\xDD][A-Za-z\xC0-\xFF ]{1,35}:)|$)`, "i");
-        const m = src.match(re);
-        if (m && m[1]) {
-          const v = normalizeSpace(m[1]);
-          if (v) return v;
-        }
-      }
-      return "";
-    }
-    function splitGenres(raw) {
-      const txt = normalizeSpace(raw || "");
-      if (!txt) return ["None"];
-      const pieces = txt.split(/,|\/|;|\|/g).map((x) => normalizeSpace(x)).filter(Boolean).flatMap((x) => x.split(/\s+e\s+/i).map((y) => normalizeSpace(y)).filter(Boolean));
-      const dedupe = [];
-      const seen = /* @__PURE__ */ new Set();
-      for (const p of pieces) {
-        const cleaned = p.replace(/^[-–—:\s]+/, "").replace(/\s{2,}/g, " ").trim();
-        if (!cleaned) continue;
-        const key = cleaned.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        dedupe.push(cleaned);
-      }
-      return dedupe.length ? dedupe : ["None"];
-    }
-    function sanitizeGenres(list) {
-      const out = [];
-      const seen = /* @__PURE__ */ new Set();
-      const banned = /(novelas|assistir|portuguesas|online|gratis|site|download|filmes)/i;
-      for (const g of list || []) {
-        const v = normalizeSpace(g);
-        if (!v) continue;
-        if (banned.test(v)) continue;
-        if (v.length > 28) continue;
-        const words = v.split(/\s+/).length;
-        if (words > 3) continue;
-        const key = v.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push(v);
-      }
-      return out.length ? out : ["None"];
-    }
-    function extractGenresFromBlock(block) {
-      const src = normalizeSpace(block);
-      if (!src) return ["None"];
-      const labeled = labelValue(src, [
-        "G[\xE9e]nero",
-        "G[\xE9e]neros",
-        "Categoria",
-        "Categorias",
-        "Classifica[c\xE7][a\xE3]o"
-      ]);
-      if (labeled) return splitGenres(labeled);
-      return ["None"];
-    }
-    function extractGenresFromPage($, block) {
-      const fromBlock = extractGenresFromBlock(block);
-      const out = [];
-      const seen = /* @__PURE__ */ new Set();
-      const push = (g) => {
-        const v = normalizeSpace(g);
-        if (!v) return;
-        const k = v.toLowerCase();
-        if (seen.has(k)) return;
-        seen.add(k);
-        out.push(v);
-      };
-      if (Array.isArray(fromBlock)) {
-        for (const g of fromBlock) {
-          if (normalizeSpace(g).toLowerCase() !== "none") push(g);
-        }
-      }
-      $('a[href*="/genero/"]').each((_, a) => {
-        const txt = normalizeSpace($(a).text());
-        if (!txt) return;
-        for (const g of splitGenres(txt)) {
-          if (normalizeSpace(g).toLowerCase() !== "none") push(g);
-        }
-      });
-      return sanitizeGenres(out.length ? out : ["None"]);
-    }
-    function releaseInfoFromBlock(block, typeHint) {
-      const src = normalizeSpace(block);
-      if (!src) return void 0;
-      const period = labelValue(src, ["Per[i\xED]odo de Exibi[c\xE7][a\xE3]o", "Per[i\xED]odo"]) || labelValue(src, ["Anos de Exibi[c\xE7][a\xE3]o"]);
-      if (period) {
-        const years = [...period.matchAll(/\b((?:19|20)\d{2})\b/g)].map((m) => parseInt(m[1], 10));
-        if (years.length >= 2) {
-          years.sort((a, b) => a - b);
-          return `${years[0]}-${years[years.length - 1]}`;
-        }
-        if (years.length === 1) return String(years[0]);
-        return period.slice(0, 40);
-      }
-      const yearAfterLabel = src.match(
-        /(?:Ano do Filme|Ano da S[ée]rie|Ano do S[ée]rie|Ano da Novela|Ano do Novela)\s*:\s*((?:19|20)\d{2})/i
-      );
-      if (yearAfterLabel && yearAfterLabel[1]) return yearAfterLabel[1];
-      const dateAfterLabel = src.match(
-        /(?:Data de Estreia|Estreia|Primeira Exibi[cç][aã]o)\s*:\s*(\d{1,2}[\/\-]\d{1,2}[\/\-](?:19|20)\d{2})/i
-      );
-      if (dateAfterLabel && dateAfterLabel[1]) return dateAfterLabel[1];
-      const estreia = labelValue(src, ["Data de Estreia", "Estreia", "Primeira Exibi[c\xE7][a\xE3]o"]);
-      if (estreia) {
-        const y = estreia.match(/\b((?:19|20)\d{2})\b/);
-        if (y) return y[1];
-        return estreia.slice(0, 40);
-      }
-      if (typeHint === "series") {
-        const y = src.match(/\b((?:19|20)\d{2})\b/);
-        if (y) return y[1];
-      }
-      return void 0;
-    }
-    function broadcasterFromBlock(block) {
-      const src = normalizeSpace(block);
-      if (!src) return void 0;
-      const labeled = labelValue(src, ["Emissora", "Canal", "Transmiss[a\xE3]o", "Exibi[c\xE7][a\xE3]o original"]);
-      if (labeled) return labeled.slice(0, 40);
-      const known = ["TVI", "SIC", "RTP1", "RTP2", "RTP", "RTP Mem\xF3ria", "RTP A\xE7ores", "RTP Madeira", "Canal Q"];
-      for (const k of known) {
-        const re = new RegExp(`\\b${k.replace(/\s+/g, "\\s+")}\\b`, "i");
-        if (re.test(src)) return k;
-      }
-      return void 0;
-    }
-    function remapEpisodes(raw) {
-      const ssids = [...new Set(raw.map((e) => e.rawSsid))].sort((a, b) => a - b);
-      const map = new Map(ssids.map((id, i) => [id, i + 1]));
-      return raw.map((e) => ({ season: map.get(e.rawSsid), episode: e.episode, wpPid: e.wpPid, name: e.name })).sort((a, b) => a.season - b.season || a.episode - b.episode);
-    }
     function detailPaths(slug, preferMovie) {
       const s = normalizeSlug(slug);
-      const f = [`/filme/${s}/`, `/filme/${s}`];
-      const r = [`/serie/${s}/`, `/serie/${s}`];
-      const arr = preferMovie ? [...f, ...r] : [...r, ...f];
-      return arr.slice(0, Math.max(1, META_MAX_PATHS));
+      const f = [`/filmes/${s}/`, `/filmes/${s}`, `/filme/${s}/`, `/filme/${s}`];
+      const r = [`/series/${s}/`, `/series/${s}`, `/serie/${s}/`, `/serie/${s}`];
+      return preferMovie ? [...f, ...r] : [...r, ...f];
     }
     async function fetchDetail(slug, preferMovie) {
       const paths = detailPaths(slug, preferMovie);
@@ -61890,7 +61790,7 @@ ${String(html || "")}`;
     }
     async function findCatalogItem(kind, slug) {
       const s = normalizeSlug(slug);
-      const lists = kind === "movie" ? [await getFilmes()] : [await getSeriesPortuguesas(), await getNovelasPortuguesas()];
+      const lists = kind === "movie" ? [await getFilmes()] : [await getSeriesPortuguesas()];
       for (const arr of lists) {
         const hit = arr.find((x) => normalizeSlug(x.slug) === s);
         if (hit) return clone(hit);
@@ -61899,8 +61799,8 @@ ${String(html || "")}`;
     }
     function shellMovieMetaFromStremioId(decoded) {
       const id = String(decoded || "");
-      if (!id.startsWith("novelaspt_movie_")) return null;
-      const slug = normalizeSlug(id.slice("novelaspt_movie_".length));
+      if (!id.startsWith("kidspt_movie_")) return null;
+      const slug = normalizeSlug(id.slice("kidspt_movie_".length));
       if (!slug) return null;
       return {
         id,
@@ -61908,15 +61808,15 @@ ${String(html || "")}`;
         slug,
         name: toTitleCase(slug.replace(/-/g, " ")),
         description: "Meta temporaria. O site de origem nao respondeu para este titulo.",
-        genres: ["None"]
+        genres: ["Anima\xE7\xE3o"]
       };
     }
     function shellSeriesMetaFromStremioId(decoded) {
       const full = String(decoded || "");
-      if (!full.startsWith("novelaspt_series_")) return null;
-      const m = full.match(/^novelaspt_series_(.+):\d+:\d+$/);
-      const id = m ? `novelaspt_series_${m[1]}` : full;
-      const slug = normalizeSlug(id.slice("novelaspt_series_".length));
+      if (!full.startsWith("kidspt_series_")) return null;
+      const m = full.match(/^kidspt_series_(.+):\d+:\d+$/);
+      const id = m ? `kidspt_series_${m[1]}` : full;
+      const slug = normalizeSlug(id.slice("kidspt_series_".length));
       if (!slug) return null;
       return {
         id,
@@ -61924,9 +61824,14 @@ ${String(html || "")}`;
         slug,
         name: toTitleCase(slug.replace(/-/g, " ")),
         description: "Meta temporaria. O site de origem nao respondeu para esta serie.",
-        genres: ["None"],
+        genres: ["Anima\xE7\xE3o"],
         episodes: [{ season: 1, episode: 1, name: "A sincronizar...", wpPid: void 0 }]
       };
+    }
+    function remapEpisodes(raw) {
+      const ssids = [...new Set(raw.map((e) => e.rawSsid))].sort((a, b) => a - b);
+      const map = new Map(ssids.map((id, i) => [id, i + 1]));
+      return raw.map((e) => ({ season: map.get(e.rawSsid), episode: e.episode, wpPid: e.wpPid, name: e.name })).sort((a, b) => a.season - b.season || a.episode - b.episode);
     }
     async function getFilmeMeta(slug) {
       const key = normalizeSlug(slug);
@@ -61934,14 +61839,13 @@ ${String(html || "")}`;
       if (c && Date.now() - c.time < META_CACHE_MS) return clone(c.item);
       const fetched = await fetchDetail(slug, true);
       if (!fetched) {
-        const fallback = await findCatalogItem("movie", slug) || null;
+        const fallback = await findCatalogItem("movie", slug);
         if (fallback) {
-          const item2 = { ...fallback, type: "movie", genres: fallback.genres || ["None"] };
+          const item2 = { ...fallback, type: "movie", genres: fallback.genres || ["Anima\xE7\xE3o"] };
           movieMetaCache.set(key, { time: Date.now(), item: clone(item2) });
           return item2;
         }
-        const stale = c?.item || null;
-        return stale ? clone(stale) : null;
+        return c?.item ? clone(c.item) : null;
       }
       const { html, path: path2 } = fetched;
       const $ = cheerio.load(html);
@@ -61950,48 +61854,26 @@ ${String(html || "")}`;
       const name = toTitleCase(
         $("h1").first().text().trim() || $(".display-page-heading h1").first().text().trim() || canonicalSlug.replace(/-/g, " ")
       );
-      const desc = extractSynopsis($);
       const details = blockText($);
       const year = yearFromText(`${details} ${$("body").text()}`) || yearFromText($("h1").first().text());
-      const releaseInfo = releaseInfoFromBlock(details, "movie") || (year ? String(year) : void 0);
-      const runtime = broadcasterFromBlock(details);
-      const genres = extractGenresFromPage($, details);
-      const poster = absoluteUrl($('meta[property="og:image"]').attr("content") || $("img").first().attr("src") || "");
       const bodyTxt = $("body").text();
       const imdbM = $.html().match(/imdb\.com\/title\/(tt\d{7,9})/i) || bodyTxt.match(/IMDb(?:\s*ID|\s*:\s*|\s+)(tt\d{7,9})/i);
-      let imdbId = imdbM ? String(imdbM[1] || imdbM[0]).toLowerCase() : void 0;
-      let imdbRating = parseImdbRating($("body").text(), html);
-      const trailerYtId = extractYoutubeTrailerId($, html);
-      const wpPostId = parseInt($.html().match(/[?&]p=(\d+)/)?.[1] || "", 10) || parseInt($(".zetaflix_player_option").first().attr("data-post") || "", 10) || void 0;
       const item = {
-        id: `novelaspt_movie_${canonicalSlug}`,
+        id: `kidspt_movie_${canonicalSlug}`,
         type: "movie",
         slug: canonicalSlug,
         name,
-        description: desc,
+        description: extractSynopsis($),
         year,
-        releaseInfo,
-        runtime,
-        genres,
-        poster: poster || void 0,
-        imdbId,
-        imdbRating,
-        trailerYtId,
-        wpPostId: Number.isFinite(wpPostId) ? wpPostId : void 0
+        releaseInfo: releaseInfoFromBlock(details) || (year ? String(year) : void 0),
+        runtime: void 0,
+        genres: ["Anima\xE7\xE3o"],
+        poster: absoluteUrl($('meta[property="og:image"]').attr("content") || $("img").first().attr("src") || "") || void 0,
+        imdbId: imdbM ? String(imdbM[1] || imdbM[0]).toLowerCase() : void 0,
+        imdbRating: parseImdbRating(bodyTxt, html),
+        trailerYtId: extractYoutubeTrailerId($, html),
+        wpPostId: parseInt($.html().match(/[?&]p=(\d+)/)?.[1] || "", 10) || parseInt($(".zetaflix_player_option").first().attr("data-post") || "", 10) || void 0
       };
-      const overrideMovieImdbId = imdbOverrideId("movie", name, canonicalSlug);
-      if (overrideMovieImdbId) imdbId = overrideMovieImdbId;
-      const cmById = imdbId ? await cinemetaByImdbId("movie", imdbId) : null;
-      if (cmById?.imdbRating) imdbRating = cmById.imdbRating;
-      if (!imdbId || !imdbRating) {
-        const cmSearch = await cinemetaSearchBest("movie", name, year);
-        if (cmSearch?.imdbId && !imdbId && cmSearch.strong) imdbId = cmSearch.imdbId;
-        if (cmSearch?.imdbRating && !imdbRating && cmSearch.strong) imdbRating = cmSearch.imdbRating;
-      }
-      const imdbRatingFromPage = imdbId ? await imdbRatingById(imdbId) : null;
-      if (imdbRatingFromPage) imdbRating = imdbRatingFromPage;
-      item.imdbId = imdbId;
-      item.imdbRating = imdbRating;
       movieMetaCache.set(key, { time: Date.now(), item: clone(item) });
       movieMetaCache.set(canonicalSlug, { time: Date.now(), item: clone(item) });
       return clone(item);
@@ -62002,19 +61884,18 @@ ${String(html || "")}`;
       if (c && Date.now() - c.time < META_CACHE_MS) return clone(c.item);
       const fetched = await fetchDetail(slug, false);
       if (!fetched) {
-        const fallback = await findCatalogItem("series", slug) || null;
+        const fallback = await findCatalogItem("series", slug);
         if (fallback) {
           const item2 = {
             ...fallback,
             type: "series",
-            genres: fallback.genres || ["None"],
+            genres: fallback.genres || ["Anima\xE7\xE3o"],
             episodes: [{ season: 1, episode: 1, name: "A sincronizar...", wpPid: void 0 }]
           };
           seriesMetaCache.set(key, { time: Date.now(), item: clone(item2) });
           return item2;
         }
-        const stale = c?.item || null;
-        return stale ? clone(stale) : null;
+        return c?.item ? clone(c.item) : null;
       }
       const { html, path: path2 } = fetched;
       const $ = cheerio.load(html);
@@ -62023,18 +61904,10 @@ ${String(html || "")}`;
       const name = toTitleCase(
         $("h1").first().text().trim() || $(".display-page-heading h1").first().text().trim() || canonicalSlug.replace(/-/g, " ")
       );
-      const desc = extractSynopsis($);
       const details = blockText($);
       const year = yearFromText(`${details} ${$("body").text()}`) || yearFromText($("h1").first().text());
-      const releaseInfo = releaseInfoFromBlock(details, "series") || (year ? String(year) : void 0);
-      const runtime = broadcasterFromBlock(details);
-      const genres = extractGenresFromPage($, details);
-      const poster = absoluteUrl($('meta[property="og:image"]').attr("content") || $("img").first().attr("src") || "");
       const bodyTxt = $("body").text();
       const imdbM = $.html().match(/imdb\.com\/title\/(tt\d{7,9})/i) || bodyTxt.match(/IMDb(?:\s*ID|\s*:\s*|\s+)(tt\d{7,9})/i);
-      let imdbId = imdbM ? String(imdbM[1] || imdbM[0]).toLowerCase() : void 0;
-      let imdbRating = parseImdbRating($("body").text(), html);
-      const trailerYtId = extractYoutubeTrailerId($, html);
       const rawEpisodes = [];
       $(".play-ep").each((_, el) => {
         const $el = $(el);
@@ -62050,38 +61923,23 @@ ${String(html || "")}`;
         }
       });
       let episodes = remapEpisodes(rawEpisodes);
-      if (!episodes.length) {
-        episodes = [{ season: 1, episode: 1, name: "A sincronizar...", wpPid: void 0 }];
-      }
+      if (!episodes.length) episodes = [{ season: 1, episode: 1, name: "A sincronizar...", wpPid: void 0 }];
       const item = {
-        id: `novelaspt_series_${canonicalSlug}`,
+        id: `kidspt_series_${canonicalSlug}`,
         type: "series",
         slug: canonicalSlug,
         name,
-        description: desc,
+        description: extractSynopsis($),
         year,
-        releaseInfo,
-        runtime,
-        genres,
-        poster: poster || void 0,
-        imdbId,
-        imdbRating,
-        trailerYtId,
+        releaseInfo: releaseInfoFromBlock(details) || (year ? String(year) : void 0),
+        runtime: void 0,
+        genres: ["Anima\xE7\xE3o"],
+        poster: absoluteUrl($('meta[property="og:image"]').attr("content") || $("img").first().attr("src") || "") || void 0,
+        imdbId: imdbM ? String(imdbM[1] || imdbM[0]).toLowerCase() : void 0,
+        imdbRating: parseImdbRating(bodyTxt, html),
+        trailerYtId: extractYoutubeTrailerId($, html),
         episodes
       };
-      const overrideSeriesImdbId = imdbOverrideId("series", name, canonicalSlug);
-      if (overrideSeriesImdbId) imdbId = overrideSeriesImdbId;
-      const cmById = imdbId ? await cinemetaByImdbId("series", imdbId) : null;
-      if (cmById?.imdbRating) imdbRating = cmById.imdbRating;
-      if (!imdbId || !imdbRating) {
-        const cmSearch = await cinemetaSearchBest("series", name, year);
-        if (cmSearch?.imdbId && !imdbId && cmSearch.strong) imdbId = cmSearch.imdbId;
-        if (cmSearch?.imdbRating && !imdbRating && cmSearch.strong) imdbRating = cmSearch.imdbRating;
-      }
-      const imdbRatingFromPage = imdbId ? await imdbRatingById(imdbId) : null;
-      if (imdbRatingFromPage) imdbRating = imdbRatingFromPage;
-      item.imdbId = imdbId;
-      item.imdbRating = imdbRating;
       seriesMetaCache.set(key, { time: Date.now(), item: clone(item) });
       seriesMetaCache.set(canonicalSlug, { time: Date.now(), item: clone(item) });
       return clone(item);
@@ -62135,17 +61993,10 @@ ${String(html || "")}`;
       }
       return out;
     }
-    function sanitizeCatalogItems(items) {
-      return items;
-    }
     module2.exports = {
       BASE_URL,
       getFilmes,
       getSeriesPortuguesas,
-      getNovelasPortuguesas,
-      getItemsByGenreLabel,
-      getCoveredIdsForGenres,
-      sanitizeCatalogItems,
       getFilmeMeta,
       getSeriesMeta,
       getMovieStreamSources,
@@ -62162,54 +62013,36 @@ var fs = require("fs");
 var path = require("path");
 var crypto = require("crypto");
 var scraper = require_scraper();
-var PORT = Number(process.env.PORT) || 7e3;
+var DEFAULT_PORT = Number(process.env.PORT) || 7e3;
 var HOST = "0.0.0.0";
-var LOG_PREFIX = "[NovelasPT]";
-var MOVIE_PREFIX = "novelaspt_movie_";
-var SERIES_PREFIX = "novelaspt_series_";
-var ADDON_NAME = "Filmes, Series e Novelas Portuguesas Addon Stremio";
-var VERSION = "2.0.0";
+var LOG_PREFIX = "[KidsPT]";
+var MAX_PORT_RETRIES = 10;
+var activePort = DEFAULT_PORT;
+var remainingPortRetries = MAX_PORT_RETRIES;
+var MOVIE_PREFIX = "kidspt_movie_";
+var SERIES_PREFIX = "kidspt_series_";
+var ADDON_NAME = "Kids Filmes e Series de Animacao PT-PT Addon Stremio";
+var VERSION = "1.0.0";
 var CATALOG_PAGE_SIZE = 100;
-var GENRE_OPTIONS = [
-  "None",
-  "A\xE7\xE3o",
-  "Aventura",
-  "Com\xE9dia",
-  "Drama",
-  "Romance",
-  "Suspense",
-  "Terror",
-  "Crime",
-  "Document\xE1rio",
-  "Anima\xE7\xE3o",
-  "Fam\xEDlia",
-  "Fantasia",
-  "Hist\xF3ria",
-  "M\xFAsica",
-  "Mist\xE9rio",
-  "Guerra",
-  "Western",
-  "Biografia"
-];
 var CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type"
 };
 function manifestOriginFromRequest(req) {
-  const host = req.headers.host || `127.0.0.1:${PORT}`;
+  const host = req.headers.host || `127.0.0.1:${activePort}`;
   const protoRaw = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
   const proto = protoRaw === "https" ? "https" : "http";
   return `${proto}://${host}`;
 }
 function getManifest(originBase) {
   const base = { configurable: false, configurationRequired: false };
-  const logo = originBase ? `${originBase.replace(/\/$/, "")}/addon-logo.png` : void 0;
+  const logo = originBase ? `${originBase.replace(/\/$/, "")}/addon-logo.svg` : void 0;
   return {
-    id: "pt.filmes-series-portuguesas",
+    id: "pt.animacao-kids-stremio",
     version: VERSION,
     name: ADDON_NAME,
-    description: "Filmes, series e novelas portuguesas com streams externos.",
+    description: "Filmes e series de animacao em PT-PT com streams externos.",
     resources: ["catalog", "meta", "stream"],
     types: ["movie", "series"],
     idPrefixes: [MOVIE_PREFIX, SERIES_PREFIX],
@@ -62217,31 +62050,19 @@ function getManifest(originBase) {
     catalogs: [
       {
         type: "movie",
-        id: "novelaspt_filmes",
-        name: "Filmes Portugueses",
+        id: "kidspt_filmes",
+        name: "Filmes Animacao PT-PT",
         extra: [
           { name: "search", isRequired: false },
-          { name: "genre", isRequired: false, options: GENRE_OPTIONS },
           { name: "skip", isRequired: false }
         ]
       },
       {
         type: "series",
-        id: "novelaspt_series",
-        name: "Series Portuguesas",
+        id: "kidspt_series",
+        name: "Series Animacao PT-PT",
         extra: [
           { name: "search", isRequired: false },
-          { name: "genre", isRequired: false, options: GENRE_OPTIONS },
-          { name: "skip", isRequired: false }
-        ]
-      },
-      {
-        type: "series",
-        id: "novelaspt_novelas",
-        name: "Novelas Portuguesas",
-        extra: [
-          { name: "search", isRequired: false },
-          { name: "genre", isRequired: false, options: GENRE_OPTIONS },
           { name: "skip", isRequired: false }
         ]
       }
@@ -62308,23 +62129,17 @@ function sendText(res, method, status, text) {
   res.end(body);
 }
 function seriesBaseId(decodedSeriesId) {
-  const m = String(decodedSeriesId).match(/^novelaspt_series_(.+):\d+:\d+$/);
+  const m = String(decodedSeriesId).match(/^kidspt_series_(.+):\d+:\d+$/);
   return m ? `${SERIES_PREFIX}${m[1]}` : String(decodedSeriesId);
 }
 function releaseInfoFromItem(item) {
   const ri = String(item.releaseInfo || "").trim();
   const broadcaster = String(item.runtime || "").trim();
   const rating = String(item.imdbRating || "").trim();
-  const broadcasterPart = broadcaster ? broadcaster : "";
-  const ratingPart = rating ? `IMDb ${rating}` : "";
-  const appendParts = (base) => {
-    const parts = [String(base || "").trim(), broadcasterPart, ratingPart].filter(Boolean);
-    return parts.length ? parts.join(" | ") : void 0;
-  };
-  if (ri && !/^\d{1,3}$/.test(ri)) return appendParts(ri);
+  const parts = [ri, broadcaster, rating ? `IMDb ${rating}` : ""].filter(Boolean);
+  if (parts.length) return parts.join(" | ");
   const y = Number(item.year);
-  if (Number.isFinite(y) && y >= 1870 && y <= 2100) return appendParts(String(y));
-  if (broadcasterPart || ratingPart) return [broadcasterPart, ratingPart].filter(Boolean).join(" | ");
+  if (Number.isFinite(y) && y >= 1870 && y <= 2100) return String(y);
   return void 0;
 }
 function metaPreview(item) {
@@ -62336,7 +62151,7 @@ function metaPreview(item) {
     posterShape: "poster",
     ...item.description ? { description: item.description } : {},
     ...releaseInfoFromItem(item) ? { releaseInfo: releaseInfoFromItem(item) } : {},
-    ...Array.isArray(item.genres) && item.genres.length ? { genres: item.genres } : { genres: ["None"] }
+    ...Array.isArray(item.genres) && item.genres.length ? { genres: item.genres } : { genres: ["Anima\xE7\xE3o"] }
   };
 }
 function fullMeta(item, responseId, forceType) {
@@ -62352,10 +62167,9 @@ function fullMeta(item, responseId, forceType) {
     ...item.description ? { description: item.description } : {},
     ...releaseInfoFromItem(item) ? { releaseInfo: releaseInfoFromItem(item) } : {},
     ...item.runtime ? { runtime: item.runtime } : {},
-    ...Array.isArray(item.genres) && item.genres.length ? { genres: item.genres } : { genres: ["None"] },
+    ...Array.isArray(item.genres) && item.genres.length ? { genres: item.genres } : { genres: ["Anima\xE7\xE3o"] },
     ...item.imdbRating ? { imdbRating: String(item.imdbRating) } : {},
     ...item.trailerYtId ? {
-      /* Trailer button no Stremio (ao lado de Add to library). */
       trailer: { ytId: item.trailerYtId },
       trailers: [{ source: item.trailerYtId, type: "Trailer" }]
     } : {}
@@ -62389,29 +62203,8 @@ function streamIdFromUrl(u) {
 }
 async function handleCatalog(type, id, extra) {
   let items = [];
-  if (type === "movie" && id === "novelaspt_filmes") items = await scraper.getFilmes();
-  else if (type === "series" && id === "novelaspt_series") items = await scraper.getSeriesPortuguesas();
-  else if (type === "series" && id === "novelaspt_novelas") items = await scraper.getNovelasPortuguesas();
-  const genreRaw = String(extra.genre || "").trim();
-  if (genreRaw) {
-    const wanted = normalizeSearch(genreRaw);
-    if (wanted !== "none") {
-      const byGenre = await scraper.getItemsByGenreLabel(genreRaw);
-      const allowedIds = new Set(
-        byGenre.filter((x) => x.type === type).map((x) => x.id)
-      );
-      items = items.filter((it) => allowedIds.has(it.id)).map((it) => ({ ...it, genres: [genreRaw] }));
-      if (type === "series" && id === "novelaspt_novelas") {
-        const novelasSet = new Set((await scraper.getNovelasPortuguesas()).map((x) => x.id));
-        items = items.filter((it) => novelasSet.has(it.id));
-      }
-    } else {
-      const knownLabels = GENRE_OPTIONS.filter((g) => normalizeSearch(g) !== "none");
-      const byKnown = await scraper.getCoveredIdsForGenres(knownLabels);
-      if (byKnown.size > 0) items = items.filter((it) => !byKnown.has(it.id));
-      items = items.map((it) => ({ ...it, genres: ["None"] }));
-    }
-  }
+  if (type === "movie" && id === "kidspt_filmes") items = await scraper.getFilmes();
+  else if (type === "series" && id === "kidspt_series") items = await scraper.getSeriesPortuguesas();
   const search = String(extra.search || "").trim();
   if (search) {
     const q = normalizeSearch(search);
@@ -62452,8 +62245,8 @@ async function handleStream(type, id, extra) {
     const src2 = await scraper.getMovieStreamSources(meta2.wpPostId);
     return {
       streams: src2.map((s) => ({
-        id: `novelaspt-${streamIdFromUrl(s.url)}`,
-        name: meta2.name || "NovelasPT",
+        id: `kidspt-${streamIdFromUrl(s.url)}`,
+        name: meta2.name || "KidsPT",
         title: s.title || "Player",
         externalUrl: s.url
       }))
@@ -62463,7 +62256,7 @@ async function handleStream(type, id, extra) {
   let slug;
   let season;
   let episode;
-  const m = decoded.match(/^novelaspt_series_(.+):(\d+):(\d+)$/);
+  const m = decoded.match(/^kidspt_series_(.+):(\d+):(\d+)$/);
   if (m) {
     slug = m[1];
     season = Math.max(1, parseInt(m[2], 10) || 1);
@@ -62480,8 +62273,8 @@ async function handleStream(type, id, extra) {
   const src = await scraper.getTvEpisodeStreamSources(ep.wpPid);
   return {
     streams: src.map((s) => ({
-      id: `novelaspt-${streamIdFromUrl(s.url)}`,
-      name: meta.name || "NovelasPT",
+      id: `kidspt-${streamIdFromUrl(s.url)}`,
+      name: meta.name || "KidsPT",
       title: s.title || "Player",
       externalUrl: s.url
     }))
@@ -62513,7 +62306,6 @@ var server = http.createServer(async (req, res) => {
     if (pathname === "/manifest.json") {
       return sendJson(res, method, 200, getManifest(manifestOriginFromRequest(req)));
     }
-    if (pathname === "/addon-logo.png") return sendPublic(res, method, "addon-logo.png", "image/png");
     if (pathname === "/addon-logo.svg") return sendPublic(res, method, "addon-logo.svg", "image/svg+xml; charset=utf-8");
     if (pathname === "/configure" || pathname === "/configure/") return sendPublic(res, method, "configure.html", "text/html; charset=utf-8");
     if (parts[0] === "catalog" && parts.length >= 3) {
@@ -62542,14 +62334,24 @@ var server = http.createServer(async (req, res) => {
     return sendJson(res, method, 500, { error: msg });
   }
 });
+function startListening(port) {
+  activePort = port;
+  server.listen(activePort, HOST, () => {
+    console.log(`${LOG_PREFIX} Addon running on http://127.0.0.1:${activePort}`);
+    console.log(`${LOG_PREFIX} Manifest: http://127.0.0.1:${activePort}/manifest.json`);
+  });
+}
 server.on("error", (err) => {
+  if (err && err.code === "EADDRINUSE" && remainingPortRetries > 0) {
+    const nextPort = activePort + 1;
+    remainingPortRetries -= 1;
+    console.warn(`${LOG_PREFIX} Porta ${activePort} ocupada, a tentar ${nextPort}...`);
+    return setTimeout(() => startListening(nextPort), 150);
+  }
   console.error(`${LOG_PREFIX} Server error: ${err.message}`);
   process.exit(1);
 });
-server.listen(PORT, HOST, () => {
-  console.log(`${LOG_PREFIX} Addon running on http://127.0.0.1:${PORT}`);
-  console.log(`${LOG_PREFIX} Manifest: http://127.0.0.1:${PORT}/manifest.json`);
-});
+startListening(activePort);
 /*! Bundled license information:
 
 mime-db/index.js:
