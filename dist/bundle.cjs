@@ -61648,6 +61648,15 @@ ${String(html || "")}`;
       const label = contentType === "movie" ? "filmes" : "series";
       console.log(`[KidsPT][catalog:${label}] ${msg}`);
     }
+    function finalResponseUrl(res) {
+      return String(res?.request?.res?.responseUrl || "");
+    }
+    function pageFromUrl(u) {
+      const m = String(u || "").match(/\/page\/(\d+)\/?/i);
+      if (!m) return 1;
+      const n = parseInt(m[1], 10);
+      return Number.isFinite(n) && n > 0 ? n : 1;
+    }
     async function fetchCatalog(startUrl, contentType) {
       const firstPath = startUrl.startsWith(BASE_URL) ? startUrl.slice(BASE_URL.length) : startUrl;
       const first = await safeClientGet(firstPath || "/", 3, HTTP_TIMEOUT_MS);
@@ -61659,11 +61668,20 @@ ${String(html || "")}`;
       catalogLog(contentType, `Paginacao visivel no HTML sugere ate ${hintedMaxPage} paginas`);
       let discoveredMaxPage = firstItems.length ? 1 : 0;
       let consecutiveMisses = 0;
-      const probeLimit = Math.min(ARCHIVE_MAX_PAGES, Math.max(hintedMaxPage + 2, 3));
+      const probeLimit = ARCHIVE_MAX_PAGES;
       for (let p = 2; p <= probeLimit; p++) {
         const url = `${startUrl.replace(/\/$/, "")}/page/${p}/`;
         const path2 = url.startsWith(BASE_URL) ? url.slice(BASE_URL.length) : url;
         const res = await safeClientGet(path2, 2, HTTP_TIMEOUT_MS);
+        const finalUrl = finalResponseUrl(res);
+        const landedPage = pageFromUrl(finalUrl || url);
+        if (res && res.status === 200 && landedPage < p) {
+          catalogLog(
+            contentType,
+            `Sondagem pagina ${p}: redirecionada para pagina ${landedPage} (fim detetado)`
+          );
+          break;
+        }
         if (!res || res.status !== 200 || typeof res.data !== "string") {
           consecutiveMisses += 1;
           catalogLog(contentType, `Sondagem pagina ${p}: sem conteudo (status ${res?.status || "erro"})`);
@@ -61678,7 +61696,7 @@ ${String(html || "")}`;
             catalogLog(contentType, `Sondagem pagina ${p}: vazia`);
           }
         }
-        if (p > hintedMaxPage && consecutiveMisses >= 2) break;
+        if (consecutiveMisses >= 2) break;
       }
       if (discoveredMaxPage <= 0) discoveredMaxPage = 1;
       catalogLog(contentType, `Total de paginas encontradas: ${discoveredMaxPage}`);
