@@ -62061,6 +62061,10 @@ function getManifest(originBase) {
     version: VERSION,
     name: ADDON_NAME,
     description: "Filmes e series de animacao em PT-PT com streams externos.",
+    stremioAddonsConfig: {
+      issuer: "https://stremio-addons.net",
+      signature: "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..0kMdIvKJvBGsSjLVAf_H8w.V_ZQ7BhytRDccgQJt7wWSW14QqdcgMDFkEXRSdXdvViXdvXgPZ54ad_UdTifKrJeKSvNFdmyI7MW65gPZlJjYxemRtqe9U_pHF549pcKpsrz2MMQO89RaFCdenWhXNvs.ypvwnwsw3BquW-TIR3m2pA"
+    },
     resources: ["catalog", "meta", "stream"],
     types: ["movie", "series"],
     idPrefixes: [MOVIE_PREFIX, SERIES_PREFIX],
