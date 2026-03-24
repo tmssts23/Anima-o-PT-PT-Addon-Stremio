@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: novelaspt-stremio-addon
+    runtime: node
+    region: frankfurt
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /manifest.json
+    envVars:
+      - key: STREMIO_NP_CACHE_MS
+        value: "21600000"
+      - key: STREMIO_NP_META_CACHE_MS
+        value: "21600000"
+      - key: STREMIO_NP_META_TIMEOUT_MS
+        value: "6000"
+      - key: STREMIO_NP_META_RETRIES
+        value: "1"
+      - key: STREMIO_NP_META_MAX_PATHS
+        value: "3"

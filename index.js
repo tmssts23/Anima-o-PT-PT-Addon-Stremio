@@ -5,18 +5,36 @@ const crypto = require('crypto');
 
 const scraper = require('./lib/scraper');
 
-const DEFAULT_PORT = Number(process.env.PORT) || 7000;
+const PORT = Number(process.env.PORT) || 7000;
 const HOST = '0.0.0.0';
-const LOG_PREFIX = '[KidsPT]';
-const MAX_PORT_RETRIES = 10;
-let activePort = DEFAULT_PORT;
-let remainingPortRetries = MAX_PORT_RETRIES;
+const LOG_PREFIX = '[NovelasPT]';
 
-const MOVIE_PREFIX = 'kidspt_movie_';
-const SERIES_PREFIX = 'kidspt_series_';
-const ADDON_NAME = 'Kids Filmes e Series de Animacao PT-PT Addon Stremio';
-const VERSION = '1.0.0';
+const MOVIE_PREFIX = 'novelaspt_movie_';
+const SERIES_PREFIX = 'novelaspt_series_';
+const ADDON_NAME = 'Filmes, Series e Novelas Portuguesas Addon Stremio';
+const VERSION = '2.0.0';
 const CATALOG_PAGE_SIZE = 100;
+const GENRE_OPTIONS = [
+  'None',
+  'Ação',
+  'Aventura',
+  'Comédia',
+  'Drama',
+  'Romance',
+  'Suspense',
+  'Terror',
+  'Crime',
+  'Documentário',
+  'Animação',
+  'Família',
+  'Fantasia',
+  'História',
+  'Música',
+  'Mistério',
+  'Guerra',
+  'Western',
+  'Biografia',
+];
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -25,7 +43,7 @@ const CORS = {
 };
 
 function manifestOriginFromRequest(req) {
-  const host = req.headers.host || `127.0.0.1:${activePort}`;
+  const host = req.headers.host || `127.0.0.1:${PORT}`;
   const protoRaw = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
   const proto = protoRaw === 'https' ? 'https' : 'http';
   return `${proto}://${host}`;
@@ -33,12 +51,12 @@ function manifestOriginFromRequest(req) {
 
 function getManifest(originBase) {
   const base = { configurable: false, configurationRequired: false };
-  const logo = originBase ? `${originBase.replace(/\/$/, '')}/addon-logo.svg` : undefined;
+  const logo = originBase ? `${originBase.replace(/\/$/, '')}/addon-logo.png` : undefined;
   return {
-    id: 'pt.animacao-kids-stremio',
+    id: 'pt.filmes-series-portuguesas',
     version: VERSION,
     name: ADDON_NAME,
-    description: 'Filmes e series de animacao em PT-PT com streams externos.',
+    description: 'Filmes, series e novelas portuguesas com streams externos.',
     resources: ['catalog', 'meta', 'stream'],
     types: ['movie', 'series'],
     idPrefixes: [MOVIE_PREFIX, SERIES_PREFIX],
@@ -46,19 +64,31 @@ function getManifest(originBase) {
     catalogs: [
       {
         type: 'movie',
-        id: 'kidspt_filmes',
-        name: 'Filmes Animacao PT-PT',
+        id: 'novelaspt_filmes',
+        name: 'Filmes Portugueses',
         extra: [
           { name: 'search', isRequired: false },
+          { name: 'genre', isRequired: false, options: GENRE_OPTIONS },
           { name: 'skip', isRequired: false },
         ],
       },
       {
         type: 'series',
-        id: 'kidspt_series',
-        name: 'Series Animacao PT-PT',
+        id: 'novelaspt_series',
+        name: 'Series Portuguesas',
         extra: [
           { name: 'search', isRequired: false },
+          { name: 'genre', isRequired: false, options: GENRE_OPTIONS },
+          { name: 'skip', isRequired: false },
+        ],
+      },
+      {
+        type: 'series',
+        id: 'novelaspt_novelas',
+        name: 'Novelas Portuguesas',
+        extra: [
+          { name: 'search', isRequired: false },
+          { name: 'genre', isRequired: false, options: GENRE_OPTIONS },
           { name: 'skip', isRequired: false },
         ],
       },
@@ -141,7 +171,7 @@ function sendText(res, method, status, text) {
 }
 
 function seriesBaseId(decodedSeriesId) {
-  const m = String(decodedSeriesId).match(/^kidspt_series_(.+):\d+:\d+$/);
+  const m = String(decodedSeriesId).match(/^novelaspt_series_(.+):\d+:\d+$/);
   return m ? `${SERIES_PREFIX}${m[1]}` : String(decodedSeriesId);
 }
 
@@ -149,10 +179,16 @@ function releaseInfoFromItem(item) {
   const ri = String(item.releaseInfo || '').trim();
   const broadcaster = String(item.runtime || '').trim();
   const rating = String(item.imdbRating || '').trim();
-  const parts = [ri, broadcaster, rating ? `IMDb ${rating}` : ''].filter(Boolean);
-  if (parts.length) return parts.join(' | ');
+  const broadcasterPart = broadcaster ? broadcaster : '';
+  const ratingPart = rating ? `IMDb ${rating}` : '';
+  const appendParts = (base) => {
+    const parts = [String(base || '').trim(), broadcasterPart, ratingPart].filter(Boolean);
+    return parts.length ? parts.join(' | ') : undefined;
+  };
+  if (ri && !/^\d{1,3}$/.test(ri)) return appendParts(ri);
   const y = Number(item.year);
-  if (Number.isFinite(y) && y >= 1870 && y <= 2100) return String(y);
+  if (Number.isFinite(y) && y >= 1870 && y <= 2100) return appendParts(String(y));
+  if (broadcasterPart || ratingPart) return [broadcasterPart, ratingPart].filter(Boolean).join(' | ');
   return undefined;
 }
 
@@ -165,7 +201,7 @@ function metaPreview(item) {
     posterShape: 'poster',
     ...(item.description ? { description: item.description } : {}),
     ...(releaseInfoFromItem(item) ? { releaseInfo: releaseInfoFromItem(item) } : {}),
-    ...(Array.isArray(item.genres) && item.genres.length ? { genres: item.genres } : { genres: ['Animação'] }),
+    ...(Array.isArray(item.genres) && item.genres.length ? { genres: item.genres } : { genres: ['None'] }),
   };
 }
 
@@ -182,10 +218,11 @@ function fullMeta(item, responseId, forceType) {
     ...(item.description ? { description: item.description } : {}),
     ...(releaseInfoFromItem(item) ? { releaseInfo: releaseInfoFromItem(item) } : {}),
     ...(item.runtime ? { runtime: item.runtime } : {}),
-    ...(Array.isArray(item.genres) && item.genres.length ? { genres: item.genres } : { genres: ['Animação'] }),
+    ...(Array.isArray(item.genres) && item.genres.length ? { genres: item.genres } : { genres: ['None'] }),
     ...(item.imdbRating ? { imdbRating: String(item.imdbRating) } : {}),
     ...(item.trailerYtId
       ? {
+          /* Trailer button no Stremio (ao lado de Add to library). */
           trailer: { ytId: item.trailerYtId },
           trailers: [{ source: item.trailerYtId, type: 'Trailer' }],
         }
@@ -223,8 +260,36 @@ function streamIdFromUrl(u) {
 
 async function handleCatalog(type, id, extra) {
   let items = [];
-  if (type === 'movie' && id === 'kidspt_filmes') items = await scraper.getFilmes();
-  else if (type === 'series' && id === 'kidspt_series') items = await scraper.getSeriesPortuguesas();
+  if (type === 'movie' && id === 'novelaspt_filmes') items = await scraper.getFilmes();
+  else if (type === 'series' && id === 'novelaspt_series') items = await scraper.getSeriesPortuguesas();
+  else if (type === 'series' && id === 'novelaspt_novelas') items = await scraper.getNovelasPortuguesas();
+
+  const genreRaw = String(extra.genre || '').trim();
+  if (genreRaw) {
+    const wanted = normalizeSearch(genreRaw);
+    if (wanted !== 'none') {
+      const byGenre = await scraper.getItemsByGenreLabel(genreRaw);
+      const allowedIds = new Set(
+        byGenre
+          .filter((x) => x.type === type)
+          .map((x) => x.id),
+      );
+      items = items
+        .filter((it) => allowedIds.has(it.id))
+        .map((it) => ({ ...it, genres: [genreRaw] }));
+      // Para o catálogo de novelas, restringe à lista de novelas.
+      if (type === 'series' && id === 'novelaspt_novelas') {
+        const novelasSet = new Set((await scraper.getNovelasPortuguesas()).map((x) => x.id));
+        items = items.filter((it) => novelasSet.has(it.id));
+      }
+    } else {
+      // "None": sem género mapeado no site.
+      const knownLabels = GENRE_OPTIONS.filter((g) => normalizeSearch(g) !== 'none');
+      const byKnown = await scraper.getCoveredIdsForGenres(knownLabels);
+      if (byKnown.size > 0) items = items.filter((it) => !byKnown.has(it.id));
+      items = items.map((it) => ({ ...it, genres: ['None'] }));
+    }
+  }
 
   const search = String(extra.search || '').trim();
   if (search) {
@@ -272,8 +337,8 @@ async function handleStream(type, id, extra) {
     const src = await scraper.getMovieStreamSources(meta.wpPostId);
     return {
       streams: src.map((s) => ({
-        id: `kidspt-${streamIdFromUrl(s.url)}`,
-        name: meta.name || 'KidsPT',
+        id: `novelaspt-${streamIdFromUrl(s.url)}`,
+        name: meta.name || 'NovelasPT',
         title: s.title || 'Player',
         externalUrl: s.url,
       })),
@@ -284,7 +349,7 @@ async function handleStream(type, id, extra) {
   let slug;
   let season;
   let episode;
-  const m = decoded.match(/^kidspt_series_(.+):(\d+):(\d+)$/);
+  const m = decoded.match(/^novelaspt_series_(.+):(\d+):(\d+)$/);
   if (m) {
     slug = m[1];
     season = Math.max(1, parseInt(m[2], 10) || 1);
@@ -301,8 +366,8 @@ async function handleStream(type, id, extra) {
   const src = await scraper.getTvEpisodeStreamSources(ep.wpPid);
   return {
     streams: src.map((s) => ({
-      id: `kidspt-${streamIdFromUrl(s.url)}`,
-      name: meta.name || 'KidsPT',
+      id: `novelaspt-${streamIdFromUrl(s.url)}`,
+      name: meta.name || 'NovelasPT',
       title: s.title || 'Player',
       externalUrl: s.url,
     })),
@@ -337,6 +402,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/manifest.json') {
       return sendJson(res, method, 200, getManifest(manifestOriginFromRequest(req)));
     }
+    if (pathname === '/addon-logo.png') return sendPublic(res, method, 'addon-logo.png', 'image/png');
     if (pathname === '/addon-logo.svg') return sendPublic(res, method, 'addon-logo.svg', 'image/svg+xml; charset=utf-8');
     if (pathname === '/configure' || pathname === '/configure/') return sendPublic(res, method, 'configure.html', 'text/html; charset=utf-8');
 
@@ -367,23 +433,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-function startListening(port) {
-  activePort = port;
-  server.listen(activePort, HOST, () => {
-    console.log(`${LOG_PREFIX} Addon running on http://127.0.0.1:${activePort}`);
-    console.log(`${LOG_PREFIX} Manifest: http://127.0.0.1:${activePort}/manifest.json`);
-  });
-}
-
 server.on('error', (err) => {
-  if (err && err.code === 'EADDRINUSE' && remainingPortRetries > 0) {
-    const nextPort = activePort + 1;
-    remainingPortRetries -= 1;
-    console.warn(`${LOG_PREFIX} Porta ${activePort} ocupada, a tentar ${nextPort}...`);
-    return setTimeout(() => startListening(nextPort), 150);
-  }
   console.error(`${LOG_PREFIX} Server error: ${err.message}`);
   process.exit(1);
 });
 
-startListening(activePort);
+server.listen(PORT, HOST, () => {
+  console.log(`${LOG_PREFIX} Addon running on http://127.0.0.1:${PORT}`);
+  console.log(`${LOG_PREFIX} Manifest: http://127.0.0.1:${PORT}/manifest.json`);
+});
