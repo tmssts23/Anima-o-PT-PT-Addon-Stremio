@@ -1,0 +1,21 @@
+{
+  "name": "addon-stremio-animacao-ptpt",
+  "version": "1.0.0",
+  "description": "Filmes e series de animacao PT-PT Addon Stremio",
+  "main": "dist/bundle.cjs",
+  "scripts": {
+    "build": "node build.js",
+    "start": "node dist/bundle.cjs",
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.13.1",
+    "cheerio": "^1.1.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
