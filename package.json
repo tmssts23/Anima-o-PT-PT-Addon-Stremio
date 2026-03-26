@@ -1,7 +1,7 @@
 {
-  "name": "addon-stremio-animacao-ptpt",
-  "version": "1.0.0",
-  "description": "Filmes e series de animacao PT-PT Addon Stremio",
+  "name": "filmes-series-portuguesas-addon",
+  "version": "2.0.0",
+  "description": "Filmes, Series e Novelas Portuguesas Addon Stremio",
   "main": "dist/bundle.cjs",
   "scripts": {
     "build": "node build.js",
@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "axios": "^1.13.1",
-    "cheerio": "^1.1.2"
+    "cheerio": "^1.1.2",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "esbuild": "^0.27.0"
