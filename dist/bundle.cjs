@@ -62315,7 +62315,7 @@ function sendPublic(res, method, filename, contentType) {
   if (method === "HEAD") return res.end();
   res.end(body);
 }
-var server = http.createServer(async (req, res) => {
+async function requestHandler(req, res) {
   const method = req.method || "GET";
   if (method === "OPTIONS") {
     res.writeHead(204, CORS);
@@ -62355,6 +62355,9 @@ var server = http.createServer(async (req, res) => {
     console.error(`${LOG_PREFIX} HTTP error: ${msg}`);
     return sendJson(res, method, 500, { error: msg });
   }
+}
+var server = http.createServer((req, res) => {
+  requestHandler(req, res);
 });
 function startListening(port) {
   activePort = port;
@@ -62373,7 +62376,11 @@ server.on("error", (err) => {
   console.error(`${LOG_PREFIX} Server error: ${err.message}`);
   process.exit(1);
 });
-startListening(activePort);
+if (require.main === module) startListening(activePort);
+module.exports = {
+  requestHandler,
+  getManifest
+};
 /*! Bundled license information:
 
 mime-db/index.js:

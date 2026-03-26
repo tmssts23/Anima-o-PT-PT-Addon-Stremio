@@ -328,7 +328,7 @@ function sendPublic(res, method, filename, contentType) {
   res.end(body);
 }
 
-const server = http.createServer(async (req, res) => {
+async function requestHandler(req, res) {
   const method = req.method || 'GET';
   if (method === 'OPTIONS') {
     res.writeHead(204, CORS);
@@ -370,6 +370,10 @@ const server = http.createServer(async (req, res) => {
     console.error(`${LOG_PREFIX} HTTP error: ${msg}`);
     return sendJson(res, method, 500, { error: msg });
   }
+}
+
+const server = http.createServer((req, res) => {
+  requestHandler(req, res);
 });
 
 function startListening(port) {
@@ -391,4 +395,9 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-startListening(activePort);
+if (require.main === module) startListening(activePort);
+
+module.exports = {
+  requestHandler,
+  getManifest,
+};
