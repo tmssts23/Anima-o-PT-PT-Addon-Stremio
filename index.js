@@ -11,6 +11,10 @@ const LOG_PREFIX = '[KidsPT]';
 const MAX_PORT_RETRIES = 10;
 let activePort = DEFAULT_PORT;
 let remainingPortRetries = MAX_PORT_RETRIES;
+const USER_WINDOW_MS = 24 * 60 * 60 * 1000;
+const activeUsers = new Map();
+let totalRequests = 0;
+const ANON_SALT = crypto.randomBytes(16).toString('hex');
 
 const MOVIE_PREFIX = 'kidspt_movie_';
 const SERIES_PREFIX = 'kidspt_series_';
@@ -106,6 +110,34 @@ function parseReqUrl(req) {
   const host = req.headers.host || 'localhost';
   const url = new URL(req.url || '/', `http://${host}`);
   return { pathname: url.pathname, query: Object.fromEntries(url.searchParams.entries()) };
+}
+
+function clientIpFromReq(req) {
+  const xff = String(req.headers['x-forwarded-for'] || '').trim();
+  if (xff) return xff.split(',')[0].trim();
+  return String(req.socket?.remoteAddress || req.connection?.remoteAddress || 'unknown').trim();
+}
+
+function anonUserKeyFromReq(req) {
+  const ip = clientIpFromReq(req);
+  const ua = String(req.headers['user-agent'] || 'unknown');
+  return crypto.createHash('sha256').update(`${ANON_SALT}|${ip}|${ua}`).digest('hex').slice(0, 20);
+}
+
+function usageSnapshot(userKey) {
+  const now = Date.now();
+  for (const [k, ts] of activeUsers.entries()) {
+    if (now - ts > USER_WINDOW_MS) activeUsers.delete(k);
+  }
+  if (userKey) activeUsers.set(userKey, now);
+  totalRequests += 1;
+  return { users24h: activeUsers.size, totalRequests };
+}
+
+function logUsage(route, userKey, details = '') {
+  const s = usageSnapshot(userKey);
+  const extra = details ? ` ${details}` : '';
+  console.log(`${LOG_PREFIX} [usage] route=${route} users_24h=${s.users24h} total_requests=${s.totalRequests}${extra}`);
 }
 
 function parseCatalogExtras(pathParts) {
@@ -314,6 +346,31 @@ async function handleStream(type, id, extra) {
   };
 }
 
+function trackedExternalUrl(originBase, streamUrl, type, decodedId, optionIndex, optionTitle) {
+  if (!originBase) return streamUrl;
+  const base = originBase.replace(/\/$/, '');
+  const params = new URLSearchParams({
+    u: String(streamUrl || ''),
+    t: String(type || ''),
+    id: String(decodedId || ''),
+    opt: String(optionIndex || 0),
+    title: String(optionTitle || ''),
+  });
+  return `${base}/go?${params.toString()}`;
+}
+
+function sendRedirect(res, method, status, location) {
+  const body = '';
+  res.writeHead(status, {
+    ...CORS,
+    Location: location,
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body, 'utf8'),
+  });
+  if (method === 'HEAD') return res.end();
+  res.end(body);
+}
+
 function sendPublic(res, method, filename, contentType) {
   const p = path.join(__dirname, 'public', filename);
   if (!fs.existsSync(p)) return sendText(res, method, 404, 'Not found');
@@ -338,30 +395,53 @@ async function requestHandler(req, res) {
 
   const { pathname, query } = parseReqUrl(req);
   const parts = parsePath(pathname);
+  const userKey = anonUserKeyFromReq(req);
+  const originBase = manifestOriginFromRequest(req);
   try {
     if (pathname === '/manifest.json') {
-      return sendJson(res, method, 200, getManifest(manifestOriginFromRequest(req)));
+      logUsage('manifest', userKey);
+      return sendJson(res, method, 200, getManifest(originBase));
     }
     if (pathname === '/addon-logo.svg') return sendPublic(res, method, 'addon-logo.svg', 'image/svg+xml; charset=utf-8');
     if (pathname === '/configure' || pathname === '/configure/') return sendPublic(res, method, 'configure.html', 'text/html; charset=utf-8');
+    if (parts[0] === 'go') {
+      const raw = String(query.u || '').trim();
+      if (!/^https?:\/\//i.test(raw)) return sendText(res, method, 400, 'Invalid target URL');
+      const type = String(query.t || '').trim() || 'unknown';
+      const decodedId = safeDecode(String(query.id || '').trim());
+      const option = String(query.opt || '').trim() || '0';
+      const title = String(query.title || '').trim() || `Opcao ${option}`;
+      logUsage('go', userKey, `type=${type} id=${decodedId} option=${option} title="${title}"`);
+      return sendRedirect(res, method, 302, raw);
+    }
 
     if (parts[0] === 'catalog' && parts.length >= 3) {
       const type = parts[1];
       const id = decodeURIComponent(String(parts[2]).replace(/\.json$/i, ''));
       const extra = { ...query, ...parseCatalogExtras(parts) };
+      logUsage('catalog', userKey, `type=${type} id=${id}`);
       const out = await handleCatalog(type, id, extra);
       return sendJson(res, method, 200, out);
     }
     if (parts[0] === 'meta' && parts.length >= 3) {
       const type = parts[1];
       const id = decodeURIComponent(String(parts[2]).replace(/\.json$/i, ''));
+      logUsage('meta', userKey, `type=${type} id=${id}`);
       const out = await handleMeta(type, id);
       return sendJson(res, method, 200, out);
     }
     if (parts[0] === 'stream' && parts.length >= 3) {
       const type = parts[1];
       const id = decodeURIComponent(String(parts[2]).replace(/\.json$/i, ''));
+      const decoded = safeDecode(id);
+      logUsage('stream', userKey, `type=${type} id=${decoded}`);
       const out = await handleStream(type, id, { season: query.season, episode: query.episode });
+      if (out && Array.isArray(out.streams) && out.streams.length) {
+        out.streams = out.streams.map((s, i) => ({
+          ...s,
+          externalUrl: trackedExternalUrl(originBase, s.externalUrl, type, decoded, i + 1, s.title),
+        }));
+      }
       return sendJson(res, method, 200, out);
     }
     return sendText(res, method, 404, 'Not found');
